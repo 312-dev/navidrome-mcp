@@ -851,6 +851,7 @@ var TIME_SLOTS = [
   "late night"
 ];
 var BATCH = 40;
+var CONCURRENCY = Number(process.env.MOOD_CONCURRENCY ?? 32) || 32;
 var DEFAULT_MODEL = "claude-opus-5";
 function taxonomyPrompt(store2, vibeNames) {
   const lines = [];
@@ -945,10 +946,32 @@ function describe(t) {
   ].filter(Boolean);
   return bits.join(" | ");
 }
+var PRICES = {
+  "claude-opus-5": { in: 5, out: 25 },
+  "claude-sonnet-5": { in: 3, out: 15 },
+  "claude-haiku-4-5": { in: 1, out: 5 }
+};
 var MoodEnricher = class {
   client;
   model;
-  progress = { running: false, done: 0, total: 0, cachedTokens: 0, note: "idle" };
+  progress = {
+    running: false,
+    done: 0,
+    total: 0,
+    cachedTokens: 0,
+    note: "idle",
+    usage: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, batches: 0 },
+    costSoFar: 0,
+    projectedTotal: 0,
+    discounted: false
+  };
+  /** Cost of the usage recorded so far, at this model's published rates. */
+  cost(u) {
+    const p = PRICES[this.model] ?? PRICES["claude-opus-5"];
+    const inTok = u.input + u.cacheWrite * 1.25 + u.cacheRead * 0.1;
+    const gross = inTok / 1e6 * p.in + u.output / 1e6 * p.out;
+    return this.progress.discounted ? gross / 2 : gross;
+  }
   constructor(apiKey, model) {
     this.client = new Anthropic(apiKey ? { apiKey } : {});
     this.model = model || DEFAULT_MODEL;
@@ -984,13 +1007,119 @@ ${batch.map(describe).join("\n")}`
         }
       ]
     });
-    const text = res.content.find((b) => b.type === "text");
-    if (!text || text.type !== "text") return { rows: [], cacheRead: 0 };
-    const parsed = JSON.parse(text.text);
-    return {
-      rows: parsed.tracks ?? [],
-      cacheRead: res.usage.cache_read_input_tokens ?? 0
+    const u = res.usage;
+    const usage = {
+      input: u.input_tokens ?? 0,
+      cacheWrite: u.cache_creation_input_tokens ?? 0,
+      cacheRead: u.cache_read_input_tokens ?? 0,
+      output: u.output_tokens ?? 0
     };
+    const text = res.content.find((b) => b.type === "text");
+    if (!text || text.type !== "text") return { rows: [], usage };
+    const parsed = JSON.parse(text.text);
+    return { rows: parsed.tracks ?? [], usage };
+  }
+  /** The request body shared by both the sync and batched paths. */
+  params(system, batch) {
+    return {
+      model: this.model,
+      max_tokens: 8e3,
+      thinking: { type: "disabled" },
+      output_config: {
+        effort: "low",
+        format: { type: "json_schema", schema: SCHEMA }
+      },
+      system: [
+        { type: "text", text: system, cache_control: { type: "ephemeral" } }
+      ],
+      messages: [
+        {
+          role: "user",
+          content: `Label these ${batch.length} tracks:
+
+${batch.map(describe).join("\n")}`
+        }
+      ]
+    };
+  }
+  /**
+   * Label everything via the Message Batches API.
+   *
+   * Measured on this library, the synchronous path costs ~$27.50 for 9,311
+   * tracks on Opus -- output is ~78% of that and prompt caching cannot touch it.
+   * Batching is 50% off every token, which halves it, and the trade it asks for
+   * (asynchronous, typically under an hour) costs nothing for a one-time offline
+   * enrichment. So this is the default for a full run; the synchronous path is
+   * kept for small trial runs where waiting on a queue is the worse deal.
+   */
+  async runBatched(store2, pending, onBatch) {
+    const vibeNames = Object.keys(store2.vibes);
+    const system = taxonomyPrompt(store2, vibeNames);
+    const batches = [];
+    for (let i = 0; i < pending.length; i += BATCH) batches.push(pending.slice(i, i + BATCH));
+    this.progress = {
+      running: true,
+      done: 0,
+      total: pending.length,
+      cachedTokens: 0,
+      note: `submitting ${batches.length} batches to the Batch API (${this.model})`,
+      usage: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, batches: 0 },
+      costSoFar: 0,
+      projectedTotal: 0,
+      batchId: void 0,
+      discounted: true
+    };
+    try {
+      const created = await this.client.messages.batches.create({
+        requests: batches.map((b, i) => ({
+          custom_id: `b${i}`,
+          params: this.params(system, b)
+        }))
+      });
+      this.progress.batchId = created.id;
+      this.progress.note = `queued as ${created.id}; polling`;
+      console.error(`[navidrome-mcp] mood: submitted batch ${created.id} (${batches.length} requests)`);
+      let status = created.processing_status;
+      for (let i = 0; i < 3e3 && status !== "ended"; i++) {
+        await new Promise((r) => setTimeout(r, 2e4));
+        const b = await this.client.messages.batches.retrieve(created.id);
+        status = b.processing_status;
+        const c = b.request_counts;
+        this.progress.note = `${status}: ${c.succeeded} ok, ${c.processing} running, ${c.errored} errored`;
+        this.progress.done = Math.min(pending.length, c.succeeded * BATCH);
+      }
+      if (status !== "ended") throw new Error(`batch ${created.id} did not finish in time`);
+      const acc = this.progress.usage;
+      let done = 0;
+      for await (const entry of await this.client.messages.batches.results(created.id)) {
+        if (entry.result.type !== "succeeded") {
+          console.error(`[navidrome-mcp] mood: ${entry.custom_id} ${entry.result.type}`);
+          continue;
+        }
+        const msg = entry.result.message;
+        const u = msg.usage;
+        acc.input += u.input_tokens ?? 0;
+        acc.cacheWrite += u.cache_creation_input_tokens ?? 0;
+        acc.cacheRead += u.cache_read_input_tokens ?? 0;
+        acc.output += u.output_tokens ?? 0;
+        acc.batches += 1;
+        const text = msg.content.find((b) => b.type === "text");
+        if (!text || text.type !== "text") continue;
+        try {
+          const parsed = JSON.parse(text.text);
+          const rows = parsed.tracks ?? [];
+          done += rows.length;
+          await onBatch(rows);
+        } catch (e) {
+          console.error(`[navidrome-mcp] mood: unparseable result ${entry.custom_id}: ${String(e)}`);
+        }
+      }
+      this.progress.done = done;
+      this.progress.costSoFar = Number(this.cost(acc).toFixed(4));
+      this.progress.note = `done (${done} labelled)`;
+    } finally {
+      this.progress.running = false;
+    }
   }
   /**
    * Label every track that does not already have a mood.
@@ -1008,12 +1137,26 @@ ${batch.map(describe).join("\n")}`
       done: 0,
       total: pending.length,
       cachedTokens: 0,
-      note: `${batches.length} batches on ${this.model}`
+      note: `${batches.length} batches on ${this.model}, ${CONCURRENCY}-way`,
+      usage: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, batches: 0 },
+      costSoFar: 0,
+      projectedTotal: 0,
+      discounted: false
     };
+    const libraryTotal = store2.tracks.filter((t) => !t.mood && !t.missing).length;
     const runOne = async (batch) => {
       try {
-        const { rows, cacheRead } = await this.labelBatch(system, batch);
-        this.progress.cachedTokens += cacheRead;
+        const { rows, usage } = await this.labelBatch(system, batch);
+        const acc = this.progress.usage;
+        acc.input += usage.input;
+        acc.cacheWrite += usage.cacheWrite;
+        acc.cacheRead += usage.cacheRead;
+        acc.output += usage.output;
+        acc.batches += 1;
+        this.progress.cachedTokens += usage.cacheRead;
+        this.progress.costSoFar = Number(this.cost(acc).toFixed(4));
+        const perTrack = this.cost(acc) / Math.max(1, acc.batches * BATCH);
+        this.progress.projectedTotal = Number((perTrack * libraryTotal).toFixed(2));
         await onBatch(rows);
       } catch (e) {
         console.error(`[navidrome-mcp] mood batch failed: ${String(e)}`);
@@ -1022,7 +1165,6 @@ ${batch.map(describe).join("\n")}`
       }
     };
     if (batches.length) await runOne(batches[0]);
-    const CONCURRENCY = 4;
     let next = 1;
     await Promise.all(
       Array.from({ length: Math.min(CONCURRENCY, Math.max(0, batches.length - 1)) }, async () => {
@@ -1408,14 +1550,15 @@ var Store = class {
    * Label every unlabelled track. One-time in practice: results persist to the
    * snapshot, so later runs only pick up newly-added music.
    */
-  async enrichMoods(limit) {
-    if (!this.mood) return { started: 0 };
-    if (this.mood.progress.running) return { started: 0 };
+  async enrichMoods(limit, mode) {
+    if (!this.mood) return { started: 0, mode: "none" };
+    if (this.mood.progress.running) return { started: 0, mode: "already-running" };
     let pending = this.tracks.filter((t) => !t.mood && !t.missing);
     if (limit && limit > 0) pending = pending.slice(0, limit);
-    if (!pending.length) return { started: 0 };
-    log(`mood: labelling ${pending.length} tracks`);
-    void this.mood.run(this, pending, async (rows) => {
+    if (!pending.length) return { started: 0, mode: "nothing-pending" };
+    const useBatch = mode === "batch" || mode !== "sync" && pending.length > 200;
+    log(`mood: labelling ${pending.length} tracks (${useBatch ? "batch API" : "sync"})`);
+    const onRows = async (rows) => {
       for (const r of rows) {
         if (!this.byId.has(r.id)) continue;
         const { id, ...m } = r;
@@ -1423,8 +1566,9 @@ var Store = class {
       }
       this.applyMoods();
       await this.saveSnapshot();
-    }).then(() => log(`mood: finished, ${this.tracks.filter((t) => t.mood).length} labelled`)).catch((e) => log(`mood: failed: ${String(e)}`));
-    return { started: pending.length };
+    };
+    void (useBatch ? this.mood.runBatched(this, pending, onRows) : this.mood.run(this, pending, onRows)).then(() => log(`mood: finished, ${this.tracks.filter((t) => t.mood).length} labelled`)).catch((e) => log(`mood: failed: ${String(e)}`));
+    return { started: pending.length, mode: useBatch ? "batch" : "sync" };
   }
   /**
    * Fold the listen history onto the library.
@@ -1613,7 +1757,10 @@ var store = new Store({
   daylistName: DAYLIST_NAME,
   historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 730) || 730,
   enrich: env.NAVIDROME_ENRICH !== "0",
-  anthropicKey: env.ANTHROPIC_API_KEY,
+  // Prefer a navidrome-specific key so this budget is separate from the shared
+  // ANTHROPIC_API_KEY that rocketmoney also uses, and either can be rotated
+  // without disturbing the other. Falls back to the shared key.
+  anthropicKey: env.NAVIDROME_ANTHROPIC_KEY || env.ANTHROPIC_API_KEY,
   moodModel: env.MOOD_MODEL
 });
 function result(summary, data) {
@@ -2245,14 +2392,17 @@ server.registerTool(
     description: "Run (or check) the one-time pass that gives EVERY track a mood: energy, valence, intensity, acoustic-vs-electronic, feeling descriptors, which curated vibe it reads as, and what times of day it fits.\n\nThis is what makes mood search work across the whole library rather than only the tracks already on a playlist. The library's own metadata cannot support it \u2014 genres are a few dozen coarse buckets, and BPM/ReplayGain/MusicBrainz IDs are present on under 3% of files. Results are cached permanently, so this normally runs once and then only picks up newly-added music.",
     inputSchema: {
       limit: z.number().int().optional().describe("Only label this many tracks (useful for a cheap trial run). Omit for all."),
-      status_only: z.boolean().optional().describe("Just report coverage without starting a run.")
+      status_only: z.boolean().optional().describe("Just report coverage without starting a run."),
+      mode: z.enum(["sync", "batch"]).optional().describe(
+        "'sync' runs in parallel now (~12 min for the full library, full price). 'batch' uses the Message Batches API at 50% off but is asynchronous (usually under an hour, 24h ceiling). Defaults to sync."
+      )
     }
   },
-  tool(async ({ limit, status_only }) => {
+  tool(async ({ limit, status_only, mode }) => {
     if (status_only) return result("Mood coverage.", store.moodCoverage());
-    const { started } = await store.enrichMoods(limit);
+    const { started, mode: used } = await store.enrichMoods(limit, mode ?? "sync");
     return result(
-      started ? `Started labelling ${started} tracks in the background. Poll with status_only.` : "Nothing to label (already covered, already running, or no ANTHROPIC_API_KEY).",
+      started ? `Started labelling ${started} tracks (${used}). Poll with status_only.` : "Nothing to label (already covered, already running, or no API key).",
       store.moodCoverage()
     );
   })

@@ -65,7 +65,10 @@ const store = new Store({
   daylistName: DAYLIST_NAME,
   historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 730) || 730,
   enrich: env.NAVIDROME_ENRICH !== "0",
-  anthropicKey: env.ANTHROPIC_API_KEY,
+  // Prefer a navidrome-specific key so this budget is separate from the shared
+  // ANTHROPIC_API_KEY that rocketmoney also uses, and either can be rotated
+  // without disturbing the other. Falls back to the shared key.
+  anthropicKey: env.NAVIDROME_ANTHROPIC_KEY || env.ANTHROPIC_API_KEY,
   moodModel: env.MOOD_MODEL,
 });
 
@@ -861,15 +864,21 @@ server.registerTool(
         .optional()
         .describe("Only label this many tracks (useful for a cheap trial run). Omit for all."),
       status_only: z.boolean().optional().describe("Just report coverage without starting a run."),
+      mode: z
+        .enum(["sync", "batch"])
+        .optional()
+        .describe(
+          "'sync' runs in parallel now (~12 min for the full library, full price). 'batch' uses the Message Batches API at 50% off but is asynchronous (usually under an hour, 24h ceiling). Defaults to sync.",
+        ),
     },
   },
-  tool(async ({ limit, status_only }: { limit?: number; status_only?: boolean }) => {
+  tool(async ({ limit, status_only, mode }: { limit?: number; status_only?: boolean; mode?: "sync" | "batch" }) => {
     if (status_only) return result("Mood coverage.", store.moodCoverage());
-    const { started } = await store.enrichMoods(limit);
+    const { started, mode: used } = await store.enrichMoods(limit, mode ?? "sync");
     return result(
       started
-        ? `Started labelling ${started} tracks in the background. Poll with status_only.`
-        : "Nothing to label (already covered, already running, or no ANTHROPIC_API_KEY).",
+        ? `Started labelling ${started} tracks (${used}). Poll with status_only.`
+        : "Nothing to label (already covered, already running, or no API key).",
       store.moodCoverage(),
     );
   }),

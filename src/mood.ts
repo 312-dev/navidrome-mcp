@@ -58,6 +58,14 @@ export const TIME_SLOTS = [
 
 const BATCH = 40;
 /**
+ * Parallel in-flight requests on the synchronous path.
+ *
+ * Measured against the account's real limits (10k RPM, 2M output tokens/min),
+ * 32-way concurrency consumes ~4% of the output budget -- throughput here is
+ * bounded by per-request latency (~90s for 40 records), not by throttling.
+ */
+const CONCURRENCY = Number(process.env.MOOD_CONCURRENCY ?? 32) || 32;
+/**
  * Opus by default. This is a one-time pass over the whole library whose output
  * every future mood query depends on, so the model choice is worth more than the
  * few dollars it costs; override with MOOD_MODEL to trade quality for spend.
@@ -171,18 +179,64 @@ function describe(t: Track): string {
   return bits.join(" | ");
 }
 
+/** Per-million-token prices, so a measured run can be costed exactly. */
+const PRICES: Record<string, { in: number; out: number }> = {
+  "claude-opus-5": { in: 5, out: 25 },
+  "claude-sonnet-5": { in: 3, out: 15 },
+  "claude-haiku-4-5": { in: 1, out: 5 },
+};
+
+export interface Usage {
+  /** Uncached input tokens, billed at full rate. */
+  input: number;
+  /** Written to cache this run, billed at 1.25x. */
+  cacheWrite: number;
+  /** Served from cache, billed at 0.1x. */
+  cacheRead: number;
+  output: number;
+  batches: number;
+}
+
 export interface MoodProgress {
   running: boolean;
   done: number;
   total: number;
   cachedTokens: number;
   note: string;
+  usage: Usage;
+  /** Dollars spent so far, from real usage rather than an estimate. */
+  costSoFar: number;
+  /** Extrapolated dollars for every remaining unlabelled track. */
+  projectedTotal: number;
+  /** Set when running through the Batch API. */
+  batchId?: string;
+  /** True when the 50% Batch API discount applies to costSoFar. */
+  discounted: boolean;
 }
 
 export class MoodEnricher {
   private readonly client: Anthropic;
   private readonly model: string;
-  progress: MoodProgress = { running: false, done: 0, total: 0, cachedTokens: 0, note: "idle" };
+  progress: MoodProgress = {
+    running: false,
+    done: 0,
+    total: 0,
+    cachedTokens: 0,
+    note: "idle",
+    usage: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, batches: 0 },
+    costSoFar: 0,
+    projectedTotal: 0,
+    discounted: false,
+  };
+
+  /** Cost of the usage recorded so far, at this model's published rates. */
+  private cost(u: Usage): number {
+    const p = PRICES[this.model] ?? PRICES["claude-opus-5"]!;
+    const inTok = u.input + u.cacheWrite * 1.25 + u.cacheRead * 0.1;
+    const gross = (inTok / 1e6) * p.in + (u.output / 1e6) * p.out;
+    // The Batch API bills every token at half the standard rate.
+    return this.progress.discounted ? gross / 2 : gross;
+  }
 
   constructor(apiKey?: string, model?: string) {
     this.client = new Anthropic(apiKey ? { apiKey } : {});
@@ -191,7 +245,7 @@ export class MoodEnricher {
 
   private async labelBatch(system: string, batch: Track[]): Promise<{
     rows: (Mood & { id: string })[];
-    cacheRead: number;
+    usage: Omit<Usage, "batches">;
   }> {
     const res = await this.client.messages.create({
       model: this.model,
@@ -222,13 +276,144 @@ export class MoodEnricher {
       ],
     } as Anthropic.MessageCreateParamsNonStreaming);
 
-    const text = res.content.find((b) => b.type === "text");
-    if (!text || text.type !== "text") return { rows: [], cacheRead: 0 };
-    const parsed = JSON.parse(text.text) as { tracks?: (Mood & { id: string })[] };
-    return {
-      rows: parsed.tracks ?? [],
-      cacheRead: (res.usage as { cache_read_input_tokens?: number }).cache_read_input_tokens ?? 0,
+    const u = res.usage as {
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_creation_input_tokens?: number;
+      cache_read_input_tokens?: number;
     };
+    const usage = {
+      input: u.input_tokens ?? 0,
+      cacheWrite: u.cache_creation_input_tokens ?? 0,
+      cacheRead: u.cache_read_input_tokens ?? 0,
+      output: u.output_tokens ?? 0,
+    };
+    const text = res.content.find((b) => b.type === "text");
+    if (!text || text.type !== "text") return { rows: [], usage };
+    const parsed = JSON.parse(text.text) as { tracks?: (Mood & { id: string })[] };
+    return { rows: parsed.tracks ?? [], usage };
+  }
+
+  /** The request body shared by both the sync and batched paths. */
+  private params(system: string, batch: Track[]): Anthropic.MessageCreateParamsNonStreaming {
+    return {
+      model: this.model,
+      max_tokens: 8000,
+      thinking: { type: "disabled" },
+      output_config: {
+        effort: "low",
+        format: { type: "json_schema", schema: SCHEMA as unknown as Record<string, unknown> },
+      },
+      system: [
+        { type: "text", text: system, cache_control: { type: "ephemeral" } },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: `Label these ${batch.length} tracks:\n\n${batch.map(describe).join("\n")}`,
+        },
+      ],
+    } as Anthropic.MessageCreateParamsNonStreaming;
+  }
+
+  /**
+   * Label everything via the Message Batches API.
+   *
+   * Measured on this library, the synchronous path costs ~$27.50 for 9,311
+   * tracks on Opus -- output is ~78% of that and prompt caching cannot touch it.
+   * Batching is 50% off every token, which halves it, and the trade it asks for
+   * (asynchronous, typically under an hour) costs nothing for a one-time offline
+   * enrichment. So this is the default for a full run; the synchronous path is
+   * kept for small trial runs where waiting on a queue is the worse deal.
+   */
+  async runBatched(
+    store: Store,
+    pending: Track[],
+    onBatch: (rows: (Mood & { id: string })[]) => Promise<void>,
+  ): Promise<void> {
+    const vibeNames = Object.keys(store.vibes);
+    const system = taxonomyPrompt(store, vibeNames);
+    const batches: Track[][] = [];
+    for (let i = 0; i < pending.length; i += BATCH) batches.push(pending.slice(i, i + BATCH));
+
+    this.progress = {
+      running: true,
+      done: 0,
+      total: pending.length,
+      cachedTokens: 0,
+      note: `submitting ${batches.length} batches to the Batch API (${this.model})`,
+      usage: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, batches: 0 },
+      costSoFar: 0,
+      projectedTotal: 0,
+      batchId: undefined,
+      discounted: true,
+    };
+
+    try {
+      const created = await this.client.messages.batches.create({
+        requests: batches.map((b, i) => ({
+          custom_id: `b${i}`,
+          params: this.params(system, b),
+        })),
+      });
+      this.progress.batchId = created.id;
+      this.progress.note = `queued as ${created.id}; polling`;
+      console.error(`[navidrome-mcp] mood: submitted batch ${created.id} (${batches.length} requests)`);
+
+      // Poll until the batch ends. Anthropic's guidance is most batches finish
+      // within an hour; the hard ceiling is 24h, so the loop is bounded well
+      // past that rather than looping forever on a wedged job.
+      let status = created.processing_status;
+      for (let i = 0; i < 3000 && status !== "ended"; i++) {
+        await new Promise((r) => setTimeout(r, 20_000));
+        const b = await this.client.messages.batches.retrieve(created.id);
+        status = b.processing_status;
+        const c = b.request_counts;
+        this.progress.note =
+          `${status}: ${c.succeeded} ok, ${c.processing} running, ${c.errored} errored`;
+        this.progress.done = Math.min(pending.length, c.succeeded * BATCH);
+      }
+      if (status !== "ended") throw new Error(`batch ${created.id} did not finish in time`);
+
+      // Results come back in arbitrary order, so they are keyed by custom_id --
+      // but every row also carries its own track id, so ordering is irrelevant
+      // to correctness here.
+      const acc = this.progress.usage;
+      let done = 0;
+      for await (const entry of await this.client.messages.batches.results(created.id)) {
+        if (entry.result.type !== "succeeded") {
+          console.error(`[navidrome-mcp] mood: ${entry.custom_id} ${entry.result.type}`);
+          continue;
+        }
+        const msg = entry.result.message;
+        const u = msg.usage as {
+          input_tokens?: number;
+          output_tokens?: number;
+          cache_creation_input_tokens?: number;
+          cache_read_input_tokens?: number;
+        };
+        acc.input += u.input_tokens ?? 0;
+        acc.cacheWrite += u.cache_creation_input_tokens ?? 0;
+        acc.cacheRead += u.cache_read_input_tokens ?? 0;
+        acc.output += u.output_tokens ?? 0;
+        acc.batches += 1;
+        const text = msg.content.find((b) => b.type === "text");
+        if (!text || text.type !== "text") continue;
+        try {
+          const parsed = JSON.parse(text.text) as { tracks?: (Mood & { id: string })[] };
+          const rows = parsed.tracks ?? [];
+          done += rows.length;
+          await onBatch(rows);
+        } catch (e) {
+          console.error(`[navidrome-mcp] mood: unparseable result ${entry.custom_id}: ${String(e)}`);
+        }
+      }
+      this.progress.done = done;
+      this.progress.costSoFar = Number(this.cost(acc).toFixed(4));
+      this.progress.note = `done (${done} labelled)`;
+    } finally {
+      this.progress.running = false;
+    }
   }
 
   /**
@@ -252,13 +437,30 @@ export class MoodEnricher {
       done: 0,
       total: pending.length,
       cachedTokens: 0,
-      note: `${batches.length} batches on ${this.model}`,
+      note: `${batches.length} batches on ${this.model}, ${CONCURRENCY}-way`,
+      usage: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, batches: 0 },
+      costSoFar: 0,
+      projectedTotal: 0,
+      discounted: false,
     };
+    const libraryTotal = store.tracks.filter((t) => !t.mood && !t.missing).length;
 
     const runOne = async (batch: Track[]): Promise<void> => {
       try {
-        const { rows, cacheRead } = await this.labelBatch(system, batch);
-        this.progress.cachedTokens += cacheRead;
+        const { rows, usage } = await this.labelBatch(system, batch);
+        const acc = this.progress.usage;
+        acc.input += usage.input;
+        acc.cacheWrite += usage.cacheWrite;
+        acc.cacheRead += usage.cacheRead;
+        acc.output += usage.output;
+        acc.batches += 1;
+        this.progress.cachedTokens += usage.cacheRead;
+        this.progress.costSoFar = Number(this.cost(acc).toFixed(4));
+        // Project the whole library from measured per-track cost. The first
+        // batch pays an uncached prefix the rest do not, so this over-estimates
+        // early -- deliberately, so the projection errs high, not low.
+        const perTrack = this.cost(acc) / Math.max(1, acc.batches * BATCH);
+        this.progress.projectedTotal = Number((perTrack * libraryTotal).toFixed(2));
         await onBatch(rows);
       } catch (e) {
         console.error(`[navidrome-mcp] mood batch failed: ${String(e)}`);
@@ -272,7 +474,6 @@ export class MoodEnricher {
     // so paying one uncached request up front makes every later one a cache hit.
     if (batches.length) await runOne(batches[0]!);
 
-    const CONCURRENCY = 4;
     let next = 1;
     await Promise.all(
       Array.from({ length: Math.min(CONCURRENCY, Math.max(0, batches.length - 1)) }, async () => {
