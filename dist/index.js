@@ -752,7 +752,7 @@ function brief(t) {
 }
 
 // src/store.ts
-import { mkdir, readFile, rename, writeFile } from "fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 
 // src/lastfm.ts
@@ -1341,6 +1341,27 @@ var Store = class {
       return false;
     }
   }
+  snapshotSeq = 0;
+  saveChain = Promise.resolve();
+  savePending = false;
+  /**
+   * Coalesce concurrent save requests.
+   *
+   * The snapshot is a single ~15MB document, so 32 in-flight batches each asking
+   * for a write would serialise 480MB of JSON for no benefit -- they all write
+   * the same growing state. Instead one write runs at a time and any requests
+   * arriving during it collapse into a single follow-up, which by definition
+   * includes everything they wanted persisted.
+   */
+  saveSnapshotSoon() {
+    if (this.savePending) return this.saveChain;
+    this.savePending = true;
+    this.saveChain = this.saveChain.catch(() => void 0).then(() => {
+      this.savePending = false;
+      return this.saveSnapshot();
+    });
+    return this.saveChain;
+  }
   async saveSnapshot() {
     const keyIndex = /* @__PURE__ */ new Map();
     const listenKeys = [];
@@ -1374,9 +1395,14 @@ var Store = class {
       daylistRuns: this.daylistRuns.slice(-200)
     };
     await mkdir(dirname(this.snapshotPath), { recursive: true });
-    const tmp = `${this.snapshotPath}.tmp`;
-    await writeFile(tmp, JSON.stringify(snap), "utf8");
-    await rename(tmp, this.snapshotPath);
+    const tmp = `${this.snapshotPath}.${process.pid}.${++this.snapshotSeq}.tmp`;
+    try {
+      await writeFile(tmp, JSON.stringify(snap), "utf8");
+      await rename(tmp, this.snapshotPath);
+    } catch (e) {
+      await rm(tmp, { force: true }).catch(() => void 0);
+      throw e;
+    }
   }
   // ── syncing ─────────────────────────────────────────────────────────────
   rawSongs = [];
@@ -1565,7 +1591,7 @@ var Store = class {
         this.moods[id] = m;
       }
       this.applyMoods();
-      await this.saveSnapshot();
+      await this.saveSnapshotSoon();
     };
     void (useBatch ? this.mood.runBatched(this, pending, onRows) : this.mood.run(this, pending, onRows)).then(() => log(`mood: finished, ${this.tracks.filter((t) => t.mood).length} labelled`)).catch((e) => log(`mood: failed: ${String(e)}`));
     return { started: pending.length, mode: useBatch ? "batch" : "sync" };
