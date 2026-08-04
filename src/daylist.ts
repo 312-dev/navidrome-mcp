@@ -79,6 +79,8 @@ function hourWindow(hour: number, spread = 1): number[] {
 export interface VibeFit {
   vibe: string;
   tracks: number;
+  /** Tracks the mood pass says read as this vibe but that are NOT on the playlist. */
+  extended_tracks: number;
   listens_in_window: number;
   /** >1 means this vibe is over-represented at this hour versus its own average. */
   lift: number;
@@ -89,6 +91,15 @@ export function vibeFits(store: Store, hour: number, spread = 1): VibeFit[] {
   const window = new Set(hourWindow(hour, spread));
   const windowShare = window.size / 24;
   const out: VibeFit[] = [];
+
+  // How many tracks the mood pass places in each vibe, beyond the playlist
+  // itself. This is the reach a daylist actually has once mood labels exist.
+  const extended = new Map<string, number>();
+  for (const t of store.tracks) {
+    for (const v of t.mood?.vibes ?? []) {
+      if (!t.vibes.includes(v)) extended.set(v, (extended.get(v) ?? 0) + 1);
+    }
+  }
 
   for (const [vibe, ids] of Object.entries(store.vibes)) {
     let inWindow = 0;
@@ -106,6 +117,7 @@ export function vibeFits(store: Store, hour: number, spread = 1): VibeFit[] {
     out.push({
       vibe,
       tracks: ids.length,
+      extended_tracks: extended.get(vibe) ?? 0,
       listens_in_window: inWindow,
       lift: Number((observed / windowShare).toFixed(2)),
       top_artists: [...artistCounts.entries()]

@@ -140,6 +140,12 @@ function vibeFits(store2, hour, spread = 1) {
   const window = new Set(hourWindow(hour, spread));
   const windowShare = window.size / 24;
   const out = [];
+  const extended = /* @__PURE__ */ new Map();
+  for (const t of store2.tracks) {
+    for (const v of t.mood?.vibes ?? []) {
+      if (!t.vibes.includes(v)) extended.set(v, (extended.get(v) ?? 0) + 1);
+    }
+  }
   for (const [vibe, ids] of Object.entries(store2.vibes)) {
     let inWindow = 0;
     let totalListens = 0;
@@ -156,6 +162,7 @@ function vibeFits(store2, hour, spread = 1) {
     out.push({
       vibe,
       tracks: ids.length,
+      extended_tracks: extended.get(vibe) ?? 0,
       listens_in_window: inWindow,
       lift: Number((observed / windowShare).toFixed(2)),
       top_artists: [...artistCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([a]) => a)
@@ -591,6 +598,29 @@ function search(store2, p) {
     if (p.bpm_min !== void 0 && !(t.bpm && t.bpm >= p.bpm_min)) continue;
     if (p.bpm_max !== void 0 && !(t.bpm && t.bpm <= p.bpm_max)) continue;
     if (p.starred !== void 0 && t.starred !== p.starred) continue;
+    const needsMood = p.energy_min !== void 0 || p.energy_max !== void 0 || p.valence_min !== void 0 || p.valence_max !== void 0 || p.intensity_min !== void 0 || p.intensity_max !== void 0 || p.organic_min !== void 0 || p.organic_max !== void 0 || Boolean(p.moods?.length) || Boolean(p.mood_vibes?.length) || Boolean(p.fits_time);
+    if (needsMood) {
+      const m = t.mood;
+      if (!m) continue;
+      if (p.energy_min !== void 0 && m.energy < p.energy_min) continue;
+      if (p.energy_max !== void 0 && m.energy > p.energy_max) continue;
+      if (p.valence_min !== void 0 && m.valence < p.valence_min) continue;
+      if (p.valence_max !== void 0 && m.valence > p.valence_max) continue;
+      if (p.intensity_min !== void 0 && m.intensity < p.intensity_min) continue;
+      if (p.intensity_max !== void 0 && m.intensity > p.intensity_max) continue;
+      if (p.organic_min !== void 0 && m.organic < p.organic_min) continue;
+      if (p.organic_max !== void 0 && m.organic > p.organic_max) continue;
+      if (p.moods?.length) {
+        const want = p.moods.map((x) => x.toLowerCase());
+        if (!want.some((w) => m.moods.some((x) => x.includes(w)))) continue;
+      }
+      if (p.mood_vibes?.length && !anyMatch(m.vibes, p.mood_vibes)) continue;
+      if (p.fits_time && !m.times.some((x) => x.toLowerCase() === p.fits_time.toLowerCase())) continue;
+    }
+    if (p.exclude_moods?.length && t.mood) {
+      const bad = p.exclude_moods.map((x) => x.toLowerCase());
+      if (bad.some((w) => t.mood.moods.some((x) => x.includes(w)))) continue;
+    }
     out.push(t);
   }
   const total = out.length;
@@ -704,7 +734,15 @@ function brief(t) {
     vibes: t.vibes.length ? t.vibes : void 0,
     tags: t.tags.length ? t.tags.slice(0, 6).map((x) => x.name) : void 0,
     starred: t.starred || void 0,
-    bpm: t.bpm || void 0
+    mood: t.mood ? {
+      energy: t.mood.energy,
+      valence: t.mood.valence,
+      intensity: t.mood.intensity,
+      organic: t.mood.organic,
+      moods: t.mood.moods,
+      fits: t.mood.times,
+      reads_as: t.mood.vibes.length ? t.mood.vibes : void 0
+    } : void 0
   };
 }
 
@@ -796,8 +834,207 @@ var LastFm = class _LastFm {
   }
 };
 
+// src/mood.ts
+import Anthropic from "@anthropic-ai/sdk";
+var TIME_SLOTS = [
+  "early morning",
+  "morning",
+  "midday",
+  "afternoon",
+  "golden hour",
+  "evening",
+  "late night"
+];
+var BATCH = 40;
+var DEFAULT_MODEL = "claude-opus-5";
+function taxonomyPrompt(store2, vibeNames) {
+  const lines = [];
+  lines.push(
+    "You are labelling a personal music library so it can be searched by mood.",
+    "",
+    "The listener has hand-curated playlists that ARE his mood vocabulary. Your job is to",
+    "extend that vocabulary to every track in his library, including tracks that never made",
+    "it onto one of these playlists. Judge each track on how it actually sounds and feels,",
+    "not on its genre label or its popularity.",
+    "",
+    "His curated vibes, with real examples of each:",
+    ""
+  );
+  for (const name of vibeNames) {
+    const ids = store2.vibes[name] ?? [];
+    const tracks = ids.map((id) => store2.byId.get(id)).filter((t) => Boolean(t));
+    const step = Math.max(1, Math.floor(tracks.length / 18));
+    const sample = tracks.filter((_, i) => i % step === 0).slice(0, 18);
+    const genres = /* @__PURE__ */ new Map();
+    for (const t of tracks) for (const g of t.genres) genres.set(g, (genres.get(g) ?? 0) + 1);
+    const topGenres = [...genres.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([g]) => g).join(", ");
+    lines.push(
+      `## ${name}  (${tracks.length} tracks; mostly ${topGenres || "mixed"})`,
+      ...sample.map((t) => `  - ${t.artist} \u2014 ${t.title}${t.year ? ` (${t.year})` : ""}`),
+      ""
+    );
+  }
+  lines.push(
+    "For each track you are given, return:",
+    "  energy    0-100  sleepy and still -> frantic",
+    "  valence   0-100  bleak or melancholy -> bright and joyful",
+    "  intensity 0-100  gentle -> heavy and aggressive",
+    "  organic   0-100  fully electronic -> fully acoustic",
+    "  moods     2-4 short descriptors of the feeling (e.g. hazy, anthemic, wistful, menacing)",
+    `  vibes     0-3 of his curated vibe names, ONLY where the track genuinely belongs: ${vibeNames.join(", ")}`,
+    `  times     when it fits, from: ${TIME_SLOTS.join(", ")}`,
+    "",
+    "Be decisive and use the full range of each axis -- clustering everything near 50 makes",
+    "the labels useless. Leave `vibes` empty rather than forcing a weak match. If you do not",
+    "recognise a track, infer from the artist and era rather than guessing at random.",
+    "Return one entry per track, preserving the given id exactly."
+  );
+  return lines.join("\n");
+}
+var SCHEMA = {
+  type: "object",
+  properties: {
+    tracks: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "The track id exactly as given." },
+          energy: { type: "integer", description: "0-100, sleepy to frantic." },
+          valence: { type: "integer", description: "0-100, bleak to joyful." },
+          intensity: { type: "integer", description: "0-100, gentle to aggressive." },
+          organic: { type: "integer", description: "0-100, electronic to acoustic." },
+          moods: {
+            type: "array",
+            items: { type: "string" },
+            description: "2-4 short lowercase feeling descriptors."
+          },
+          vibes: {
+            type: "array",
+            items: { type: "string" },
+            description: "0-3 curated vibe names this track belongs with."
+          },
+          times: {
+            type: "array",
+            items: { type: "string", enum: [...TIME_SLOTS] },
+            description: "Times of day the track fits."
+          }
+        },
+        required: ["id", "energy", "valence", "intensity", "organic", "moods", "vibes", "times"],
+        additionalProperties: false
+      }
+    }
+  },
+  required: ["tracks"],
+  additionalProperties: false
+};
+function describe(t) {
+  const bits = [
+    `id=${t.id}`,
+    `${t.artist} \u2014 ${t.title}`,
+    t.year ? `(${t.year})` : "",
+    t.album ? `album: ${t.album}` : "",
+    t.genres.length ? `genre: ${t.genres.join("/")}` : "",
+    t.tags.length ? `tags: ${t.tags.slice(0, 8).map((x) => x.name).join(", ")}` : "",
+    t.vibes.length ? `ALREADY ON: ${t.vibes.join(", ")}` : ""
+  ].filter(Boolean);
+  return bits.join(" | ");
+}
+var MoodEnricher = class {
+  client;
+  model;
+  progress = { running: false, done: 0, total: 0, cachedTokens: 0, note: "idle" };
+  constructor(apiKey, model) {
+    this.client = new Anthropic(apiKey ? { apiKey } : {});
+    this.model = model || DEFAULT_MODEL;
+  }
+  async labelBatch(system, batch) {
+    const res = await this.client.messages.create({
+      model: this.model,
+      max_tokens: 8e3,
+      // Classification, not reasoning: thinking would multiply the cost of a
+      // pass this wide for no gain. Disabling it is permitted at effort `high`
+      // or below, and the JSON schema constrains the output shape either way.
+      thinking: { type: "disabled" },
+      output_config: {
+        effort: "low",
+        format: { type: "json_schema", schema: SCHEMA }
+      },
+      system: [
+        {
+          type: "text",
+          text: system,
+          // The taxonomy block is identical on every request and dwarfs the
+          // per-batch track list, so caching it turns the dominant cost into a
+          // cache read after the first call.
+          cache_control: { type: "ephemeral" }
+        }
+      ],
+      messages: [
+        {
+          role: "user",
+          content: `Label these ${batch.length} tracks:
+
+${batch.map(describe).join("\n")}`
+        }
+      ]
+    });
+    const text = res.content.find((b) => b.type === "text");
+    if (!text || text.type !== "text") return { rows: [], cacheRead: 0 };
+    const parsed = JSON.parse(text.text);
+    return {
+      rows: parsed.tracks ?? [],
+      cacheRead: res.usage.cache_read_input_tokens ?? 0
+    };
+  }
+  /**
+   * Label every track that does not already have a mood.
+   *
+   * Resumable: the caller persists as it goes, so a crash or restart costs only
+   * the batch in flight.
+   */
+  async run(store2, pending, onBatch) {
+    const vibeNames = Object.keys(store2.vibes);
+    const system = taxonomyPrompt(store2, vibeNames);
+    const batches = [];
+    for (let i = 0; i < pending.length; i += BATCH) batches.push(pending.slice(i, i + BATCH));
+    this.progress = {
+      running: true,
+      done: 0,
+      total: pending.length,
+      cachedTokens: 0,
+      note: `${batches.length} batches on ${this.model}`
+    };
+    const runOne = async (batch) => {
+      try {
+        const { rows, cacheRead } = await this.labelBatch(system, batch);
+        this.progress.cachedTokens += cacheRead;
+        await onBatch(rows);
+      } catch (e) {
+        console.error(`[navidrome-mcp] mood batch failed: ${String(e)}`);
+      } finally {
+        this.progress.done += batch.length;
+      }
+    };
+    if (batches.length) await runOne(batches[0]);
+    const CONCURRENCY = 4;
+    let next = 1;
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, Math.max(0, batches.length - 1)) }, async () => {
+        for (; ; ) {
+          const i = next++;
+          if (i >= batches.length) return;
+          await runOne(batches[i]);
+        }
+      })
+    );
+    this.progress.running = false;
+    this.progress.note = "done";
+  }
+};
+
 // src/store.ts
-var SNAPSHOT_VERSION = 3;
+var SNAPSHOT_VERSION = 4;
 function log(msg) {
   console.error(`[navidrome-mcp] ${msg}`);
 }
@@ -811,6 +1048,7 @@ var Store = class {
     this.opts = opts;
     this.lastfm = new LastFm(opts.lastFmKey, opts.externalDispatcher);
     this.lb = opts.listenBrainzUser ? new ListenBrainz(opts.listenBrainzUser, opts.externalDispatcher) : null;
+    this.mood = opts.anthropicKey ? new MoodEnricher(opts.anthropicKey, opts.moodModel) : null;
   }
   opts;
   tracks = [];
@@ -824,6 +1062,8 @@ var Store = class {
   listensSyncedAt = 0;
   trackTags = {};
   artistTags = {};
+  moods = {};
+  mood;
   taggedTracks = /* @__PURE__ */ new Set();
   taggedArtists = /* @__PURE__ */ new Set();
   lastfm;
@@ -870,6 +1110,7 @@ var Store = class {
       this.artistTags = s.artistTags ?? {};
       this.taggedTracks = new Set(s.taggedTracks ?? []);
       this.taggedArtists = new Set(s.taggedArtists ?? []);
+      this.moods = s.moods ?? {};
       this.daylistRuns = s.daylistRuns ?? [];
       this.listens = (s.listenTs ?? []).map((ts, i) => {
         const key = s.listenKeys[s.listenKi[i]] ?? " ";
@@ -911,6 +1152,7 @@ var Store = class {
       listenKi,
       taggedTracks: [...this.taggedTracks],
       taggedArtists: [...this.taggedArtists],
+      moods: this.moods,
       daylistRuns: this.daylistRuns.slice(-200)
     };
     await mkdir(dirname(this.snapshotPath), { recursive: true });
@@ -1038,6 +1280,7 @@ var Store = class {
     });
     this.byId = new Map(this.tracks.map((t) => [t.id, t]));
     this.applyTags();
+    this.applyMoods();
     this.applyListenStats();
   }
   applyTags() {
@@ -1050,6 +1293,39 @@ var Store = class {
       const at = this.artistTags[norm(t.artist)];
       t.tags = at ? at.slice(0, 10) : [];
     }
+  }
+  applyMoods() {
+    for (const t of this.tracks) t.mood = this.moods[t.id];
+  }
+  /** How much of the library has a mood label yet. */
+  moodCoverage() {
+    return {
+      labelled: this.tracks.filter((t) => t.mood).length,
+      total: this.tracks.length,
+      progress: this.mood?.progress ?? { running: false, note: "no ANTHROPIC_API_KEY" }
+    };
+  }
+  /**
+   * Label every unlabelled track. One-time in practice: results persist to the
+   * snapshot, so later runs only pick up newly-added music.
+   */
+  async enrichMoods(limit) {
+    if (!this.mood) return { started: 0 };
+    if (this.mood.progress.running) return { started: 0 };
+    let pending = this.tracks.filter((t) => !t.mood && !t.missing);
+    if (limit && limit > 0) pending = pending.slice(0, limit);
+    if (!pending.length) return { started: 0 };
+    log(`mood: labelling ${pending.length} tracks`);
+    void this.mood.run(this, pending, async (rows) => {
+      for (const r of rows) {
+        if (!this.byId.has(r.id)) continue;
+        const { id, ...m } = r;
+        this.moods[id] = m;
+      }
+      this.applyMoods();
+      await this.saveSnapshot();
+    }).then(() => log(`mood: finished, ${this.tracks.filter((t) => t.mood).length} labelled`)).catch((e) => log(`mood: failed: ${String(e)}`));
+    return { started: pending.length };
   }
   /**
    * Fold the listen history onto the library.
@@ -1184,6 +1460,14 @@ var Store = class {
     this.daylistRuns.push(run);
     if (this.daylistRuns.length > 200) this.daylistRuns = this.daylistRuns.slice(-200);
   }
+  /** Distinct free-form mood descriptors across the library. */
+  moodVocabulary(limit = 80) {
+    const counts = /* @__PURE__ */ new Map();
+    for (const t of this.tracks) {
+      for (const m of t.mood?.moods ?? []) counts.set(m, (counts.get(m) ?? 0) + 1);
+    }
+    return [...counts.entries()].map(([mood, tracks]) => ({ mood, tracks })).sort((a, b) => b.tracks - a.tracks).slice(0, limit);
+  }
   /** Track ids used by the last `runs` daylists, for rotation avoidance. */
   recentDaylistTrackIds(runs) {
     const out = /* @__PURE__ */ new Set();
@@ -1225,7 +1509,9 @@ var store = new Store({
   timezone: TZ,
   daylistName: DAYLIST_NAME,
   historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 730) || 730,
-  enrich: env.NAVIDROME_ENRICH !== "0"
+  enrich: env.NAVIDROME_ENRICH !== "0",
+  anthropicKey: env.ANTHROPIC_API_KEY,
+  moodModel: env.MOOD_MODEL
 });
 function result(summary, data) {
   const text = data === void 0 ? summary : `${summary}
@@ -1287,7 +1573,9 @@ server.registerTool(
           newest: store.listens.length ? new Date(store.listens[store.listens.length - 1].ts * 1e3).toISOString().slice(0, 10) : null
         },
         tag_enrichment: store.enrichState,
-        note: "The whole library is a favourites sync, so every track here is already something he liked. Selection is about fit for the moment, not about whether he likes it."
+        mood_coverage: store.moodCoverage(),
+        mood_vocabulary: store.moodVocabulary(60),
+        note: "The whole library is a favourites sync, so every track here is already something he liked. Selection is about fit for the moment, not about whether he likes it. Mood axes and descriptors cover the whole library; `vibes` covers only tracks actually on a curated playlist."
       }
     );
   })
@@ -1327,6 +1615,20 @@ var searchShape = {
   bpm_min: z.number().optional(),
   bpm_max: z.number().optional(),
   starred: z.boolean().optional(),
+  energy_min: z.number().optional().describe("Inferred mood axis 0-100: sleepy/still -> frantic."),
+  energy_max: z.number().optional(),
+  valence_min: z.number().optional().describe("0-100: bleak/melancholy -> bright/joyful."),
+  valence_max: z.number().optional(),
+  intensity_min: z.number().optional().describe("0-100: gentle -> heavy/aggressive."),
+  intensity_max: z.number().optional(),
+  organic_min: z.number().optional().describe("0-100: fully electronic -> fully acoustic."),
+  organic_max: z.number().optional(),
+  moods: z.array(z.string()).optional().describe("Inferred feeling descriptors, e.g. ['hazy','wistful','anthemic']. Any-of, substring."),
+  exclude_moods: z.array(z.string()).optional(),
+  mood_vibes: z.array(z.string()).optional().describe(
+    "Tracks that READ AS one of his curated vibes, whether or not they are on that playlist. This is how you reach the whole library rather than just the ~3,800 playlisted tracks."
+  ),
+  fits_time: z.string().optional().describe("One of: early morning, morning, midday, afternoon, golden hour, evening, late night."),
   include_missing: z.boolean().optional().describe("Include tracks whose file is missing. Default false."),
   exclude_track_ids: z.array(z.string()).optional(),
   exclude_recent_daylists: z.number().int().optional().describe("Exclude everything used by the last N daylist runs. Use ~6 for hourly rotation."),
@@ -1355,7 +1657,7 @@ server.registerTool(
   "search_tracks",
   {
     title: "Search tracks with full compound filtering",
-    description: "The main query tool. Every filter composes: real year/date ranges, play and listen recency, curated mood membership, Last.fm tags, duration, BPM, time-of-day habit, plus per-artist diversity caps and personal-affinity ranking. Use this to source tracks for a playlist.",
+    description: "The main query tool, over the WHOLE library. Every filter composes: real year/date ranges, play and listen recency, inferred mood axes (energy/valence/intensity/organic), mood descriptors, curated OR inferred vibe membership, Last.fm tags, duration, time-of-day fit, plus per-artist diversity caps and personal-affinity ranking.\n\nFor mood requests prefer `mood_vibes` / `moods` / the axis ranges over `vibes`: `vibes` matches only the ~3,800 tracks actually on a curated playlist, while the mood fields cover all 9,000+.",
     inputSchema: searchShape,
     annotations: { readOnlyHint: true }
   },
@@ -1833,6 +2135,25 @@ server.registerTool(
 );
 var lastDaylistId;
 server.registerTool(
+  "enrich_moods",
+  {
+    title: "Label the library's moods",
+    description: "Run (or check) the one-time pass that gives EVERY track a mood: energy, valence, intensity, acoustic-vs-electronic, feeling descriptors, which curated vibe it reads as, and what times of day it fits.\n\nThis is what makes mood search work across the whole library rather than only the tracks already on a playlist. The library's own metadata cannot support it \u2014 genres are a few dozen coarse buckets, and BPM/ReplayGain/MusicBrainz IDs are present on under 3% of files. Results are cached permanently, so this normally runs once and then only picks up newly-added music.",
+    inputSchema: {
+      limit: z.number().int().optional().describe("Only label this many tracks (useful for a cheap trial run). Omit for all."),
+      status_only: z.boolean().optional().describe("Just report coverage without starting a run.")
+    }
+  },
+  tool(async ({ limit, status_only }) => {
+    if (status_only) return result("Mood coverage.", store.moodCoverage());
+    const { started } = await store.enrichMoods(limit);
+    return result(
+      started ? `Started labelling ${started} tracks in the background. Poll with status_only.` : "Nothing to label (already covered, already running, or no ANTHROPIC_API_KEY).",
+      store.moodCoverage()
+    );
+  })
+);
+server.registerTool(
   "refresh_index",
   {
     title: "Refresh the local index",
@@ -1885,6 +2206,9 @@ server.registerPrompt(
             "   daylists. Use `get_vibe_profile` if you need to know what that mood actually sounds like.",
             "",
             "3. Source tracks with `search_tracks`. Requirements:",
+            "     - use `mood_vibes` (NOT `vibes`) so you draw on the whole library, not just the",
+            "       tracks already sitting on that playlist \u2014 plus the mood axes and `fits_time` to",
+            "       shape it. Fall back to `vibes` only if mood coverage is still low.",
             "     - pass `exclude_recent_daylists: 6` so this list is not a rerun",
             "     - pass `max_per_artist: 2` so it does not collapse onto one artist",
             "     - pass `hour_of_day` from the context and leave sort on `affinity`",

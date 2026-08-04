@@ -65,6 +65,8 @@ const store = new Store({
   daylistName: DAYLIST_NAME,
   historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 730) || 730,
   enrich: env.NAVIDROME_ENRICH !== "0",
+  anthropicKey: env.ANTHROPIC_API_KEY,
+  moodModel: env.MOOD_MODEL,
 });
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -145,9 +147,12 @@ server.registerTool(
             : null,
         },
         tag_enrichment: store.enrichState,
+        mood_coverage: store.moodCoverage(),
+        mood_vocabulary: store.moodVocabulary(60),
         note:
           "The whole library is a favourites sync, so every track here is already something he liked. " +
-          "Selection is about fit for the moment, not about whether he likes it.",
+          "Selection is about fit for the moment, not about whether he likes it. " +
+          "Mood axes and descriptors cover the whole library; `vibes` covers only tracks actually on a curated playlist.",
       },
     );
   }),
@@ -199,6 +204,29 @@ const searchShape = {
   bpm_min: z.number().optional(),
   bpm_max: z.number().optional(),
   starred: z.boolean().optional(),
+  energy_min: z.number().optional().describe("Inferred mood axis 0-100: sleepy/still -> frantic."),
+  energy_max: z.number().optional(),
+  valence_min: z.number().optional().describe("0-100: bleak/melancholy -> bright/joyful."),
+  valence_max: z.number().optional(),
+  intensity_min: z.number().optional().describe("0-100: gentle -> heavy/aggressive."),
+  intensity_max: z.number().optional(),
+  organic_min: z.number().optional().describe("0-100: fully electronic -> fully acoustic."),
+  organic_max: z.number().optional(),
+  moods: z
+    .array(z.string())
+    .optional()
+    .describe("Inferred feeling descriptors, e.g. ['hazy','wistful','anthemic']. Any-of, substring."),
+  exclude_moods: z.array(z.string()).optional(),
+  mood_vibes: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Tracks that READ AS one of his curated vibes, whether or not they are on that playlist. This is how you reach the whole library rather than just the ~3,800 playlisted tracks.",
+    ),
+  fits_time: z
+    .string()
+    .optional()
+    .describe("One of: early morning, morning, midday, afternoon, golden hour, evening, late night."),
   include_missing: z.boolean().optional().describe("Include tracks whose file is missing. Default false."),
   exclude_track_ids: z.array(z.string()).optional(),
   exclude_recent_daylists: z
@@ -236,7 +264,8 @@ server.registerTool(
   {
     title: "Search tracks with full compound filtering",
     description:
-      "The main query tool. Every filter composes: real year/date ranges, play and listen recency, curated mood membership, Last.fm tags, duration, BPM, time-of-day habit, plus per-artist diversity caps and personal-affinity ranking. Use this to source tracks for a playlist.",
+      "The main query tool, over the WHOLE library. Every filter composes: real year/date ranges, play and listen recency, inferred mood axes (energy/valence/intensity/organic), mood descriptors, curated OR inferred vibe membership, Last.fm tags, duration, time-of-day fit, plus per-artist diversity caps and personal-affinity ranking.\n\n" +
+      "For mood requests prefer `mood_vibes` / `moods` / the axis ranges over `vibes`: `vibes` matches only the ~3,800 tracks actually on a curated playlist, while the mood fields cover all 9,000+.",
     inputSchema: searchShape,
     annotations: { readOnlyHint: true },
   },
@@ -817,6 +846,34 @@ server.registerTool(
 /** Remembered across calls so the rolling playlist is never duplicated. */
 let lastDaylistId: string | undefined;
 
+server.registerTool(
+  "enrich_moods",
+  {
+    title: "Label the library's moods",
+    description:
+      "Run (or check) the one-time pass that gives EVERY track a mood: energy, valence, intensity, acoustic-vs-electronic, feeling descriptors, which curated vibe it reads as, and what times of day it fits.\n\n" +
+      "This is what makes mood search work across the whole library rather than only the tracks already on a playlist. The library's own metadata cannot support it — genres are a few dozen coarse buckets, and BPM/ReplayGain/MusicBrainz IDs are present on under 3% of files. Results are cached permanently, so this normally runs once and then only picks up newly-added music.",
+    inputSchema: {
+      limit: z
+        .number()
+        .int()
+        .optional()
+        .describe("Only label this many tracks (useful for a cheap trial run). Omit for all."),
+      status_only: z.boolean().optional().describe("Just report coverage without starting a run."),
+    },
+  },
+  tool(async ({ limit, status_only }: { limit?: number; status_only?: boolean }) => {
+    if (status_only) return result("Mood coverage.", store.moodCoverage());
+    const { started } = await store.enrichMoods(limit);
+    return result(
+      started
+        ? `Started labelling ${started} tracks in the background. Poll with status_only.`
+        : "Nothing to label (already covered, already running, or no ANTHROPIC_API_KEY).",
+      store.moodCoverage(),
+    );
+  }),
+);
+
 // ── refresh ─────────────────────────────────────────────────────────────────
 
 server.registerTool(
@@ -877,6 +934,9 @@ server.registerPrompt(
             "   daylists. Use `get_vibe_profile` if you need to know what that mood actually sounds like.",
             "",
             "3. Source tracks with `search_tracks`. Requirements:",
+            "     - use `mood_vibes` (NOT `vibes`) so you draw on the whole library, not just the",
+            "       tracks already sitting on that playlist — plus the mood axes and `fits_time` to",
+            "       shape it. Fall back to `vibes` only if mood coverage is still low.",
             "     - pass `exclude_recent_daylists: 6` so this list is not a rerun",
             "     - pass `max_per_artist: 2` so it does not collapse onto one artist",
             "     - pass `hour_of_day` from the context and leave sort on `affinity`",

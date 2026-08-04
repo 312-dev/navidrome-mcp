@@ -45,6 +45,21 @@ export interface SearchParams {
   bpm_min?: number;
   bpm_max?: number;
   starred?: boolean;
+  // Inferred mood axes (0-100), covering the whole library including tracks on
+  // no curated playlist. See mood.ts.
+  energy_min?: number;
+  energy_max?: number;
+  valence_min?: number;
+  valence_max?: number;
+  intensity_min?: number;
+  intensity_max?: number;
+  organic_min?: number;
+  organic_max?: number;
+  moods?: string[];
+  exclude_moods?: string[];
+  /** Vibes the model inferred, whether or not the track is on that playlist. */
+  mood_vibes?: string[];
+  fits_time?: string;
   include_missing?: boolean;
   exclude_track_ids?: string[];
   exclude_recent_daylists?: number;
@@ -187,6 +202,38 @@ export function search(store: Store, p: SearchParams): { total: number; tracks: 
     if (p.bpm_max !== undefined && !(t.bpm && t.bpm <= p.bpm_max)) continue;
     if (p.starred !== undefined && t.starred !== p.starred) continue;
 
+    // Mood filters. A track with no mood yet cannot satisfy one, so it drops out
+    // rather than silently passing -- otherwise an unlabelled library would look
+    // like every track matched every mood.
+    const needsMood =
+      p.energy_min !== undefined || p.energy_max !== undefined ||
+      p.valence_min !== undefined || p.valence_max !== undefined ||
+      p.intensity_min !== undefined || p.intensity_max !== undefined ||
+      p.organic_min !== undefined || p.organic_max !== undefined ||
+      Boolean(p.moods?.length) || Boolean(p.mood_vibes?.length) || Boolean(p.fits_time);
+    if (needsMood) {
+      const m = t.mood;
+      if (!m) continue;
+      if (p.energy_min !== undefined && m.energy < p.energy_min) continue;
+      if (p.energy_max !== undefined && m.energy > p.energy_max) continue;
+      if (p.valence_min !== undefined && m.valence < p.valence_min) continue;
+      if (p.valence_max !== undefined && m.valence > p.valence_max) continue;
+      if (p.intensity_min !== undefined && m.intensity < p.intensity_min) continue;
+      if (p.intensity_max !== undefined && m.intensity > p.intensity_max) continue;
+      if (p.organic_min !== undefined && m.organic < p.organic_min) continue;
+      if (p.organic_max !== undefined && m.organic > p.organic_max) continue;
+      if (p.moods?.length) {
+        const want = p.moods.map((x) => x.toLowerCase());
+        if (!want.some((w) => m.moods.some((x) => x.includes(w)))) continue;
+      }
+      if (p.mood_vibes?.length && !anyMatch(m.vibes, p.mood_vibes)) continue;
+      if (p.fits_time && !m.times.some((x) => x.toLowerCase() === p.fits_time!.toLowerCase())) continue;
+    }
+    if (p.exclude_moods?.length && t.mood) {
+      const bad = p.exclude_moods.map((x) => x.toLowerCase());
+      if (bad.some((w) => t.mood!.moods.some((x) => x.includes(w)))) continue;
+    }
+
     out.push(t);
   }
 
@@ -321,6 +368,16 @@ export function brief(t: Track): Record<string, unknown> {
     vibes: t.vibes.length ? t.vibes : undefined,
     tags: t.tags.length ? t.tags.slice(0, 6).map((x) => x.name) : undefined,
     starred: t.starred || undefined,
-    bpm: t.bpm || undefined,
+    mood: t.mood
+      ? {
+          energy: t.mood.energy,
+          valence: t.mood.valence,
+          intensity: t.mood.intensity,
+          organic: t.mood.organic,
+          moods: t.mood.moods,
+          fits: t.mood.times,
+          reads_as: t.mood.vibes.length ? t.mood.vibes : undefined,
+        }
+      : undefined,
   };
 }
