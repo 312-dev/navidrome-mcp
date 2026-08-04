@@ -13,8 +13,12 @@ Navidrome's API alone cannot do this, for three concrete reasons:
    "90s rock I haven't played in a year, max 2 per artist" is not expressible.
 2. **It keeps no listen history.** Only a `playCount` and a *last* `playDate`. There is
    no way to ask "what do I put on at 7am on a Tuesday".
-3. **Library genre tags are far too coarse for mood.** A typical library has a few dozen
-   genres with one of them covering half the tracks, and no mood/style tags at all.
+3. **Nothing in the library says how a track *feels*.** Measured on a real 9,311-track
+   library: 32 genres with Rock alone covering 47%, BPM present on **24 tracks (0.3%)**,
+   ReplayGain on 222 (2%), MusicBrainz recording IDs on 222 (2%). That last number also
+   rules out AcousticBrainz as a primary mood source — its audio-derived mood models are
+   keyed by MBID, and resolving the rest via ISRC → MusicBrainz (rate-limited to 1 req/s)
+   would still only reach ~23% of the library.
 
 So this server maintains its own index and joins three sources:
 
@@ -27,6 +31,24 @@ So this server maintains its own index and joins three sources:
 It also treats **your existing curated playlists as your mood vocabulary**. If you have
 playlists called `golden hour`, `cranked` and `slow shreds`, those words already mean
 something specific in your library — far more than a generic genre ever will.
+
+## The mood pass
+
+Those playlists cover maybe 40% of a library, so on their own they can only answer mood
+questions about tracks you already filed. A one-time enrichment pass closes that gap: every
+track gets **energy, valence, intensity, acoustic-vs-electronic, free-form descriptors, the
+curated vibe it reads as, and the times of day it fits**.
+
+The inference is grounded in your own playlists — they're a hand-labelled training set in
+your own words — so unfiled tracks land in the same space as the ones you filed. Results
+are cached permanently, so this runs once and afterwards only picks up new music.
+
+Cost stays small through three things: batching ~40 tracks per request, **prompt-caching the
+large identical taxonomy prefix** (the first batch runs alone, so the rest hit a warm cache
+instead of all missing it concurrently), and running with thinking disabled — this is
+classification, not reasoning. Set `ANTHROPIC_API_KEY` to enable it and `MOOD_MODEL` to
+trade quality for spend; without a key everything else still works and only the mood
+filters go dark.
 
 ## Design notes
 
