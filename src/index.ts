@@ -63,6 +63,7 @@ const store = new Store({
   lastFmKey: env.LASTFM_API_KEY,
   timezone: TZ,
   daylistName: DAYLIST_NAME,
+  historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 730) || 730,
   enrich: env.NAVIDROME_ENRICH !== "0",
 });
 

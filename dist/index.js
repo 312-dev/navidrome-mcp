@@ -45,9 +45,13 @@ var ListenBrainz = class {
     for (let page = 0; page < 2e3; page++) {
       const qs = new URLSearchParams({ count: "1000" });
       if (maxTs !== void 0) qs.set("max_ts", String(maxTs));
-      const body = await this.get(
-        `${API}/user/${encodeURIComponent(this.username)}/listens?${qs}`
-      );
+      let body;
+      try {
+        body = await this.get(`${API}/user/${encodeURIComponent(this.username)}/listens?${qs}`);
+      } catch (e) {
+        console.error(`[navidrome-mcp] listens: stopping early after ${out.length} (${String(e)})`);
+        break;
+      }
       const payload = body.payload;
       const rows = payload?.listens ?? [];
       if (!rows.length) break;
@@ -794,6 +798,9 @@ var LastFm = class _LastFm {
 
 // src/store.ts
 var SNAPSHOT_VERSION = 3;
+function log(msg) {
+  console.error(`[navidrome-mcp] ${msg}`);
+}
 function toMs(s) {
   if (!s) return 0;
   const t = Date.parse(String(s));
@@ -916,7 +923,11 @@ var Store = class {
   /** Pull every track and every playlist, and rebuild the derived index. */
   async syncLibrary() {
     const nd = this.opts.navidrome;
-    const songs = await nd.allSongs();
+    const t0 = Date.now();
+    const songs = await nd.allSongs((n) => {
+      if (n % 2e3 === 0) log(`library: ${n} tracks pulled`);
+    });
+    log(`library: ${songs.length} tracks in ${Math.round((Date.now() - t0) / 1e3)}s`);
     const playlists = await nd.listPlaylists();
     this.playlists = playlists;
     const vibes = {};
@@ -931,6 +942,7 @@ var Store = class {
     }
     this.vibes = vibes;
     this.syncedAt = Date.now();
+    log(`vibes: ${Object.keys(vibes).length} curated playlists indexed`);
     this.build(songs);
     return { tracks: this.tracks.length, vibes: Object.keys(vibes).length };
   }
@@ -951,8 +963,16 @@ var Store = class {
   }
   async syncListens(full = false) {
     if (!this.lb) return 0;
-    const since = full ? 0 : this.listensSyncedAt;
-    const fresh = await this.lb.listens({ since });
+    const floor = Math.floor(Date.now() / 1e3) - this.opts.historyDays * 86400;
+    const since = full ? floor : Math.max(this.listensSyncedAt, floor);
+    const t0 = Date.now();
+    const fresh = await this.lb.listens({
+      since,
+      onProgress: (n) => {
+        if (n % 5e3 === 0) log(`listens: ${n} fetched (${Math.round((Date.now() - t0) / 1e3)}s)`);
+      }
+    });
+    log(`listens: ${fresh.length} new in ${Math.round((Date.now() - t0) / 1e3)}s`);
     if (fresh.length) {
       const seen = new Set(this.listens.map((l) => `${l.ts}|${l.artist}|${l.track}`));
       for (const l of fresh) {
@@ -1204,6 +1224,7 @@ var store = new Store({
   lastFmKey: env.LASTFM_API_KEY,
   timezone: TZ,
   daylistName: DAYLIST_NAME,
+  historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 730) || 730,
   enrich: env.NAVIDROME_ENRICH !== "0"
 });
 function result(summary, data) {
