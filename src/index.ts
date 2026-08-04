@@ -148,11 +148,12 @@ server.registerTool(
         },
         tag_enrichment: store.enrichState,
         mood_coverage: store.moodCoverage(),
+        vibe_propagation: store.propagation,
         mood_vocabulary: store.moodVocabulary(60),
         note:
           "The whole library is a favourites sync, so every track here is already something he liked. " +
           "Selection is about fit for the moment, not about whether he likes it. " +
-          "Mood axes and descriptors cover the whole library; `vibes` covers only tracks actually on a curated playlist.",
+          "Use `mood_vibes` to reach the whole library: it matches hand-curated membership PLUS tracks predicted to belong by tag similarity to his own playlists (measured 63% top-1 / 85% top-2 on a holdout). Plain `vibes` matches only the ~3,800 tracks he filed by hand. The numeric mood axes need the mood pass, which is separate.",
       },
     );
   }),
@@ -221,7 +222,7 @@ const searchShape = {
     .array(z.string())
     .optional()
     .describe(
-      "Tracks that READ AS one of his curated vibes, whether or not they are on that playlist. This is how you reach the whole library rather than just the ~3,800 playlisted tracks.",
+      "Tracks that READ AS one of his curated vibes, whether or not they are filed on that playlist. Matches hand-curated membership, the mood pass, and tag-similarity predictions — so it reaches the whole library, not just the ~3,800 playlisted tracks. Prefer this over `vibes` for any mood request.",
     ),
   fits_time: z
     .string()

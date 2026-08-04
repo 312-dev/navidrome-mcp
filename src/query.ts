@@ -202,15 +202,25 @@ export function search(store: Store, p: SearchParams): { total: number; tracks: 
     if (p.bpm_max !== undefined && !(t.bpm && t.bpm <= p.bpm_max)) continue;
     if (p.starred !== undefined && t.starred !== p.starred) continue;
 
-    // Mood filters. A track with no mood yet cannot satisfy one, so it drops out
-    // rather than silently passing -- otherwise an unlabelled library would look
-    // like every track matched every mood.
+    // Vibe matching across all three sources: hand-curated membership, the
+    // LLM mood pass, and tag-propagated guesses. Checked before the mood-axis
+    // block because propagation works with no mood labels at all -- that is the
+    // whole point of it.
+    if (p.mood_vibes?.length) {
+      const guessed = (t.guessedVibes ?? []).map((g) => g.vibe);
+      const all = [...t.vibes, ...(t.mood?.vibes ?? []), ...guessed];
+      if (!anyMatch(all, p.mood_vibes)) continue;
+    }
+
+    // Mood-axis filters. A track with no mood yet cannot satisfy one, so it
+    // drops out rather than silently passing -- otherwise an unlabelled library
+    // would look like every track matched every mood.
     const needsMood =
       p.energy_min !== undefined || p.energy_max !== undefined ||
       p.valence_min !== undefined || p.valence_max !== undefined ||
       p.intensity_min !== undefined || p.intensity_max !== undefined ||
       p.organic_min !== undefined || p.organic_max !== undefined ||
-      Boolean(p.moods?.length) || Boolean(p.mood_vibes?.length) || Boolean(p.fits_time);
+      Boolean(p.moods?.length) || Boolean(p.fits_time);
     if (needsMood) {
       const m = t.mood;
       if (!m) continue;
@@ -226,7 +236,6 @@ export function search(store: Store, p: SearchParams): { total: number; tracks: 
         const want = p.moods.map((x) => x.toLowerCase());
         if (!want.some((w) => m.moods.some((x) => x.includes(w)))) continue;
       }
-      if (p.mood_vibes?.length && !anyMatch(m.vibes, p.mood_vibes)) continue;
       if (p.fits_time && !m.times.some((x) => x.toLowerCase() === p.fits_time!.toLowerCase())) continue;
     }
     if (p.exclude_moods?.length && t.mood) {
@@ -366,6 +375,11 @@ export function brief(t: Track): Record<string, unknown> {
     listens: t.listens || undefined,
     last_listened: t.lastListen ? new Date(t.lastListen * 1000).toISOString().slice(0, 10) : undefined,
     vibes: t.vibes.length ? t.vibes : undefined,
+    reads_as: t.vibes.length
+      ? undefined
+      : t.guessedVibes?.length
+        ? t.guessedVibes.map((g) => `${g.vibe} (${g.score})`)
+        : undefined,
     tags: t.tags.length ? t.tags.slice(0, 6).map((x) => x.name) : undefined,
     starred: t.starred || undefined,
     mood: t.mood

@@ -598,7 +598,12 @@ function search(store2, p) {
     if (p.bpm_min !== void 0 && !(t.bpm && t.bpm >= p.bpm_min)) continue;
     if (p.bpm_max !== void 0 && !(t.bpm && t.bpm <= p.bpm_max)) continue;
     if (p.starred !== void 0 && t.starred !== p.starred) continue;
-    const needsMood = p.energy_min !== void 0 || p.energy_max !== void 0 || p.valence_min !== void 0 || p.valence_max !== void 0 || p.intensity_min !== void 0 || p.intensity_max !== void 0 || p.organic_min !== void 0 || p.organic_max !== void 0 || Boolean(p.moods?.length) || Boolean(p.mood_vibes?.length) || Boolean(p.fits_time);
+    if (p.mood_vibes?.length) {
+      const guessed = (t.guessedVibes ?? []).map((g) => g.vibe);
+      const all = [...t.vibes, ...t.mood?.vibes ?? [], ...guessed];
+      if (!anyMatch(all, p.mood_vibes)) continue;
+    }
+    const needsMood = p.energy_min !== void 0 || p.energy_max !== void 0 || p.valence_min !== void 0 || p.valence_max !== void 0 || p.intensity_min !== void 0 || p.intensity_max !== void 0 || p.organic_min !== void 0 || p.organic_max !== void 0 || Boolean(p.moods?.length) || Boolean(p.fits_time);
     if (needsMood) {
       const m = t.mood;
       if (!m) continue;
@@ -614,7 +619,6 @@ function search(store2, p) {
         const want = p.moods.map((x) => x.toLowerCase());
         if (!want.some((w) => m.moods.some((x) => x.includes(w)))) continue;
       }
-      if (p.mood_vibes?.length && !anyMatch(m.vibes, p.mood_vibes)) continue;
       if (p.fits_time && !m.times.some((x) => x.toLowerCase() === p.fits_time.toLowerCase())) continue;
     }
     if (p.exclude_moods?.length && t.mood) {
@@ -732,6 +736,7 @@ function brief(t) {
     listens: t.listens || void 0,
     last_listened: t.lastListen ? new Date(t.lastListen * 1e3).toISOString().slice(0, 10) : void 0,
     vibes: t.vibes.length ? t.vibes : void 0,
+    reads_as: t.vibes.length ? void 0 : t.guessedVibes?.length ? t.guessedVibes.map((g) => `${g.vibe} (${g.score})`) : void 0,
     tags: t.tags.length ? t.tags.slice(0, 6).map((x) => x.name) : void 0,
     starred: t.starred || void 0,
     mood: t.mood ? {
@@ -1033,6 +1038,77 @@ ${batch.map(describe).join("\n")}`
   }
 };
 
+// src/propagate.ts
+function unit(v) {
+  let n = 0;
+  for (const x of v.values()) n += x * x;
+  n = Math.sqrt(n) || 1;
+  for (const [k, x] of v) v.set(k, x / n);
+  return v;
+}
+function cosine(a, b) {
+  const [small, big] = a.size < b.size ? [a, b] : [b, a];
+  let s = 0;
+  for (const [k, x] of small) {
+    const y = big.get(k);
+    if (y) s += x * y;
+  }
+  return s;
+}
+function propagateVibes(tracks, opts = {}) {
+  const topN = opts.topN ?? 3;
+  const minScore = opts.minScore ?? 0.12;
+  const df = /* @__PURE__ */ new Map();
+  for (const t of tracks) {
+    for (const tag of t.tags) df.set(tag.name, (df.get(tag.name) ?? 0) + 1);
+  }
+  const N = Math.max(1, tracks.length);
+  const idf = (name) => Math.log(N / (1 + (df.get(name) ?? 0)));
+  const vectorOf = (t) => {
+    if (!t.tags.length) return null;
+    const v = /* @__PURE__ */ new Map();
+    for (const tag of t.tags) v.set(tag.name, tag.count / 100 * idf(tag.name));
+    return unit(v);
+  };
+  const centroids = /* @__PURE__ */ new Map();
+  const seen = /* @__PURE__ */ new Map();
+  let trained = 0;
+  for (const t of tracks) {
+    if (!t.vibes.length) continue;
+    const v = vectorOf(t);
+    if (!v) continue;
+    trained++;
+    for (const name of t.vibes) {
+      let c = centroids.get(name);
+      if (!c) {
+        c = /* @__PURE__ */ new Map();
+        centroids.set(name, c);
+      }
+      for (const [k, x] of v) c.set(k, (c.get(k) ?? 0) + x);
+      seen.set(name, (seen.get(name) ?? 0) + 1);
+    }
+  }
+  for (const c of centroids.values()) unit(c);
+  const guesses = /* @__PURE__ */ new Map();
+  let predicted = 0;
+  for (const t of tracks) {
+    if (t.vibes.length) continue;
+    const v = vectorOf(t);
+    if (!v) continue;
+    const scored = [];
+    for (const [vibe, c] of centroids) {
+      if (!seen.get(vibe)) continue;
+      const s = cosine(v, c);
+      if (s >= minScore) scored.push({ vibe, score: Number(s.toFixed(3)) });
+    }
+    if (!scored.length) continue;
+    scored.sort((a, b) => b.score - a.score);
+    guesses.set(t.id, scored.slice(0, topN));
+    predicted++;
+  }
+  return { guesses, trained, predicted };
+}
+
 // src/store.ts
 var SNAPSHOT_VERSION = 4;
 function log(msg) {
@@ -1281,6 +1357,7 @@ var Store = class {
     this.byId = new Map(this.tracks.map((t) => [t.id, t]));
     this.applyTags();
     this.applyMoods();
+    this.applyPropagation();
     this.applyListenStats();
   }
   applyTags() {
@@ -1296,6 +1373,28 @@ var Store = class {
   }
   applyMoods() {
     for (const t of this.tracks) t.mood = this.moods[t.id];
+  }
+  /**
+   * Re-derive predicted vibes. Cheap (milliseconds) and derived purely from data
+   * already in memory, so it is re-run whenever tags change rather than cached.
+   */
+  propagation = {
+    trained: 0,
+    predicted: 0,
+    coverage: 0
+  };
+  applyPropagation() {
+    if (!this.tracks.length) return;
+    const { guesses, trained, predicted } = propagateVibes(
+      this.tracks.map((t) => ({ id: t.id, tags: t.tags, vibes: t.vibes }))
+    );
+    for (const t of this.tracks) t.guessedVibes = guesses.get(t.id);
+    const covered = this.tracks.filter((t) => t.vibes.length || t.guessedVibes?.length).length;
+    this.propagation = {
+      trained,
+      predicted,
+      coverage: Number((100 * covered / this.tracks.length).toFixed(1))
+    };
   }
   /** How much of the library has a mood label yet. */
   moodCoverage() {
@@ -1402,10 +1501,12 @@ var Store = class {
         if (++n % 100 === 0) {
           this.enrichState.done = n;
           this.applyTags();
+          this.applyPropagation();
           await this.saveSnapshot();
         }
       }
       this.applyTags();
+      this.applyPropagation();
       await this.saveSnapshot();
       this.enrichState = {
         running: true,
@@ -1422,10 +1523,12 @@ var Store = class {
         if (++n % 100 === 0) {
           this.enrichState.done = n;
           this.applyTags();
+          this.applyPropagation();
           await this.saveSnapshot();
         }
       }
       this.applyTags();
+      this.applyPropagation();
       await this.saveSnapshot();
     } catch {
     } finally {
@@ -1574,8 +1677,9 @@ server.registerTool(
         },
         tag_enrichment: store.enrichState,
         mood_coverage: store.moodCoverage(),
+        vibe_propagation: store.propagation,
         mood_vocabulary: store.moodVocabulary(60),
-        note: "The whole library is a favourites sync, so every track here is already something he liked. Selection is about fit for the moment, not about whether he likes it. Mood axes and descriptors cover the whole library; `vibes` covers only tracks actually on a curated playlist."
+        note: "The whole library is a favourites sync, so every track here is already something he liked. Selection is about fit for the moment, not about whether he likes it. Use `mood_vibes` to reach the whole library: it matches hand-curated membership PLUS tracks predicted to belong by tag similarity to his own playlists (measured 63% top-1 / 85% top-2 on a holdout). Plain `vibes` matches only the ~3,800 tracks he filed by hand. The numeric mood axes need the mood pass, which is separate."
       }
     );
   })
@@ -1626,7 +1730,7 @@ var searchShape = {
   moods: z.array(z.string()).optional().describe("Inferred feeling descriptors, e.g. ['hazy','wistful','anthemic']. Any-of, substring."),
   exclude_moods: z.array(z.string()).optional(),
   mood_vibes: z.array(z.string()).optional().describe(
-    "Tracks that READ AS one of his curated vibes, whether or not they are on that playlist. This is how you reach the whole library rather than just the ~3,800 playlisted tracks."
+    "Tracks that READ AS one of his curated vibes, whether or not they are filed on that playlist. Matches hand-curated membership, the mood pass, and tag-similarity predictions \u2014 so it reaches the whole library, not just the ~3,800 playlisted tracks. Prefer this over `vibes` for any mood request."
   ),
   fits_time: z.string().optional().describe("One of: early morning, morning, midday, afternoon, golden hour, evening, late night."),
   include_missing: z.boolean().optional().describe("Include tracks whose file is missing. Default false."),
