@@ -139,6 +139,29 @@ snapshot v5, so there is nothing to regress.
 **Exit:** `grep -ri anthropic src/` is empty, and the connector has no path to
 produce a label.
 
+## The tag contract
+
+`src/moodtags.ts` `TAGS` is the source of truth for the names, and the plugin
+must write exactly these. Changing one is a breaking change across two repos.
+
+| Tag | Kind | Notes |
+|---|---|---|
+| `mood` | multi | 2-4 vocabulary terms. Standard Vorbis/ID3 field, mapped by Navidrome already |
+| `moodenergy` `moodvalence` `moodintensity` `moodacousticness` `mooddensity` | numeric 0-100 | Need `mappings.yaml` registration to be queryable server-side |
+| `moodtempo` | enum | `still\|slow\|mid\|driving\|frantic` |
+| `moodvocal` | enum | `instrumental\|sung\|rapped\|mixed` |
+| `moodtime` | multi | time-of-day slots |
+| `vibe` | multi | region names, computed by the plugin from its own anchors |
+
+The connector treats the five axes plus tempo and vocal as **all-or-nothing**: a
+partial point cannot be measured against another one, so a track missing any of
+them is treated as unlabelled rather than as a point with a zero on one axis.
+
+**Open: the plugin's name.** It writes ten tags now, and `mood` describes one of
+them. `navidrome-moodspace` is the leading alternative -- it names the coordinate
+system rather than the word list, and still contains "mood" for discoverability.
+Undecided; rename before publishing a remote, not after.
+
 ## Phase 2 — Plugin becomes the enrichment authority
 
 - [ ] Port the 52 anchored terms, 146 synonyms and 14 regions into Go as the
