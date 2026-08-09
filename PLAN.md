@@ -85,17 +85,24 @@ full-LLM run.
 
 ## Phase 5 — Ship
 
-Blocked on Grayson (no credential here can do these):
+**The hostname is `navidrome-mcp.graysons.network`**, not `navidrome.` — commit
+`724e5fa` renamed it and everything Cloudflare-side already matches.
 
-- [ ] `cd ~/repos/mcp-gateway/worker && npx wrangler deploy`
-- [ ] Add `https://navidrome.graysons.network/callback` to the **MCP Gateway**
-      Access-for-SaaS app
-- [ ] Add the connector in claude.ai at `https://navidrome.graysons.network`
+Verified 2026-08-09:
+
+- [x] Worker deployed (2026-08-04 21:50 UTC) and routing `navidrome-mcp`
+- [x] `https://navidrome-mcp.graysons.network/callback` registered on the
+      **MCP Gateway** Access-for-SaaS app
+- [x] Live probe returns 403 — identical to the known-good `xbox` connector,
+      i.e. the Access challenge, which is correct for an unauthenticated request
+- [x] Orphaned `navidrome.graysons.network/*` route deleted (it pointed at the
+      worker, which has no `navidrome` key, and answered a confusing 405)
+- [ ] **Add the connector in claude.ai** at `https://navidrome-mcp.graysons.network`
 - [ ] Create the recurring task (prompt in `DAYLIST.md`)
 
-Then: verify the connector answers over the public route, and that the gateway's
-navidrome server is healthy — a local probe on 8012 returned `000` on 2026-08-09
-and needs re-checking.
+Known drift, harmless: the live worker predates commits `bf8b34e` and `0a401b9`,
+so its `BACKENDS` still lists sophtron / spotify / todoist / wrongcard. Their DNS
+is gone, so nothing reaches them. The next worker change will carry the sync.
 
 ## Phase 6 — Hygiene
 
