@@ -93,145 +93,62 @@ function primaryArtist(s) {
   );
 }
 
-// src/moodspace.ts
-var TEMPO_FEELS = ["still", "slow", "mid", "driving", "frantic"];
-var VOCAL_KINDS = ["instrumental", "sung", "rapped", "mixed"];
-var W = {
-  intensity: 1.6,
-  acousticness: 1.4,
-  density: 1,
-  energy: 1,
-  valence: 0.45
-};
-var TEMPO_INDEX = {
-  still: 0,
-  slow: 1,
-  mid: 2,
-  driving: 3,
-  frantic: 4
-};
-var TEMPO_STEP_COST = 18;
-function vocalCost(a, b) {
-  if (a === b) return 0;
-  const pair = [a, b].sort().join("|");
-  switch (pair) {
-    case "mixed|sung":
-      return 4;
-    case "mixed|rapped":
-      return 8;
-    case "rapped|sung":
-      return 20;
-    case "instrumental|sung":
-      return 16;
-    case "instrumental|mixed":
-      return 18;
-    case "instrumental|rapped":
-      return 28;
-    default:
-      return 12;
-  }
-}
-function numericDistance(a, b) {
-  const sq = W.intensity * (a.intensity - b.intensity) ** 2 + W.acousticness * (a.acousticness - b.acousticness) ** 2 + W.density * (a.density - b.density) ** 2 + W.energy * (a.energy - b.energy) ** 2 + W.valence * (a.valence - b.valence) ** 2;
-  const totalW = W.intensity + W.acousticness + W.density + W.energy + W.valence;
-  return Math.sqrt(sq / totalW);
-}
-function moodDistance(a, b) {
-  const tempo = Math.abs(TEMPO_INDEX[a.tempoFeel] - TEMPO_INDEX[b.tempoFeel]) * TEMPO_STEP_COST;
-  return numericDistance(a, b) + tempo + vocalCost(a.vocal, b.vocal);
-}
-function centroid(points) {
-  if (!points.length) return null;
-  const mean = (f) => points.reduce((s, p) => s + f(p), 0) / points.length;
-  const tempos = points.map((p) => TEMPO_INDEX[p.tempoFeel]).sort((x, y) => x - y);
-  const tIdx = tempos[Math.floor(tempos.length / 2)];
-  const vocalCounts = /* @__PURE__ */ new Map();
-  for (const p of points) vocalCounts.set(p.vocal, (vocalCounts.get(p.vocal) ?? 0) + 1);
-  const vocal = [...vocalCounts.entries()].sort((x, y) => y[1] - x[1])[0][0];
-  const moodCounts = /* @__PURE__ */ new Map();
-  for (const p of points) for (const m of p.moods) moodCounts.set(m, (moodCounts.get(m) ?? 0) + 1);
-  return {
-    energy: mean((p) => p.energy),
-    valence: mean((p) => p.valence),
-    intensity: mean((p) => p.intensity),
-    acousticness: mean((p) => p.acousticness),
-    density: mean((p) => p.density),
-    tempoFeel: TEMPO_FEELS[tIdx],
-    vocal,
-    moods: [...moodCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([m]) => m)
-  };
-}
-function spreadRadius(points, quantile = 0.75) {
-  const c = centroid(points);
-  if (!c || points.length < 2) return 0;
-  const ds = points.map((p) => moodDistance(p, c)).sort((a, b) => a - b);
-  return ds[Math.min(ds.length - 1, Math.floor(ds.length * quantile))];
-}
-
 // src/vocabulary.ts
-var MOOD_ANCHORS = {
-  // ── low arousal, positive valence: calm, warm, at ease ──────────────────
-  serene: { energy: 12, valence: 62, intensity: 10, acousticness: 85, density: 20, gloss: "still and untroubled; space around every sound" },
-  tender: { energy: 20, valence: 58, intensity: 14, acousticness: 78, density: 25, gloss: "soft and close, handled carefully" },
-  gentle: { energy: 22, valence: 56, intensity: 15, acousticness: 76, density: 26, gloss: "unhurried and mild, nothing forced" },
-  warm: { energy: 32, valence: 66, intensity: 25, acousticness: 68, density: 40, gloss: "rounded and comfortable; low-end without weight" },
-  mellow: { energy: 30, valence: 60, intensity: 20, acousticness: 62, density: 35, gloss: "relaxed and smooth-edged" },
-  pastoral: { energy: 20, valence: 58, intensity: 15, acousticness: 90, density: 22, gloss: "open, rural, acoustic; air and daylight" },
-  intimate: { energy: 22, valence: 50, intensity: 15, acousticness: 80, density: 20, gloss: "small-room close; you hear the performer breathe" },
-  hushed: { energy: 16, valence: 48, intensity: 12, acousticness: 78, density: 18, gloss: "deliberately quiet, held back" },
-  dreamy: { energy: 28, valence: 58, intensity: 20, acousticness: 45, density: 50, gloss: "blurred and reverberant, edges softened" },
-  // ── low arousal, negative valence: sad, heavy-hearted, still ────────────
-  melancholy: { energy: 26, valence: 26, intensity: 22, acousticness: 62, density: 35, gloss: "settled sadness, not acute" },
-  mournful: { energy: 20, valence: 18, intensity: 20, acousticness: 70, density: 30, gloss: "grieving; weight without volume" },
-  lonesome: { energy: 24, valence: 28, intensity: 18, acousticness: 82, density: 20, gloss: "solitary and spare, often a single voice" },
-  bleak: { energy: 20, valence: 12, intensity: 28, acousticness: 45, density: 32, gloss: "cold and without consolation" },
-  weary: { energy: 22, valence: 32, intensity: 20, acousticness: 58, density: 32, gloss: "worn down, dragging slightly" },
-  wistful: { energy: 30, valence: 40, intensity: 22, acousticness: 65, density: 35, gloss: "longing, gently unresolved" },
-  // ── mid arousal, positive valence: bright, moving, good-natured ─────────
-  sunny: { energy: 48, valence: 80, intensity: 30, acousticness: 58, density: 45, gloss: "bright and uncomplicated" },
-  sweet: { energy: 36, valence: 76, intensity: 20, acousticness: 70, density: 35, gloss: "affectionate and light" },
-  playful: { energy: 52, valence: 78, intensity: 30, acousticness: 55, density: 45, gloss: "bouncing, unserious" },
-  breezy: { energy: 44, valence: 72, intensity: 28, acousticness: 58, density: 40, gloss: "easy forward motion, no effort showing" },
-  groovy: { energy: 55, valence: 68, intensity: 35, acousticness: 45, density: 52, gloss: "pocket-led; the rhythm section is the point" },
-  funky: { energy: 60, valence: 70, intensity: 42, acousticness: 45, density: 58, gloss: "syncopated and physical" },
-  swinging: { energy: 50, valence: 74, intensity: 32, acousticness: 78, density: 48, gloss: "lilting triplet feel, live-band warmth" },
-  jaunty: { energy: 48, valence: 74, intensity: 30, acousticness: 72, density: 42, gloss: "chipper and stepping along" },
-  // ── mid arousal, negative valence: unsettled, dark but not violent ──────
-  moody: { energy: 40, valence: 34, intensity: 40, acousticness: 40, density: 45, gloss: "overcast; withholding" },
-  brooding: { energy: 38, valence: 26, intensity: 45, acousticness: 40, density: 45, gloss: "gathering, something held down" },
-  tense: { energy: 52, valence: 30, intensity: 55, acousticness: 35, density: 50, gloss: "wound tight, unresolved" },
-  restless: { energy: 58, valence: 40, intensity: 50, acousticness: 42, density: 50, gloss: "agitated, unable to settle" },
-  smouldering: { energy: 45, valence: 40, intensity: 45, acousticness: 55, density: 45, gloss: "slow-burning heat, held in reserve" },
-  defiant: { energy: 62, valence: 45, intensity: 60, acousticness: 40, density: 60, gloss: "planted and pushing back" },
-  // ── high arousal, positive valence: lift, celebration, drive ────────────
-  euphoric: { energy: 84, valence: 86, intensity: 50, acousticness: 18, density: 72, gloss: "peak lift; hands in the air" },
-  exuberant: { energy: 80, valence: 82, intensity: 45, acousticness: 50, density: 65, gloss: "overflowing, unrestrained delight" },
-  triumphant: { energy: 78, valence: 78, intensity: 62, acousticness: 45, density: 78, gloss: "victorious, full-width" },
-  anthemic: { energy: 72, valence: 66, intensity: 58, acousticness: 42, density: 76, gloss: "built to be sung back by a crowd" },
-  driving: { energy: 76, valence: 56, intensity: 60, acousticness: 35, density: 66, gloss: "relentless forward propulsion" },
-  danceable: { energy: 68, valence: 72, intensity: 42, acousticness: 25, density: 60, gloss: "made to move to; steady and physical" },
-  // ── high arousal, negative valence: force, threat, fury ─────────────────
-  aggressive: { energy: 85, valence: 30, intensity: 85, acousticness: 25, density: 76, gloss: "attacking; force is the message" },
-  furious: { energy: 92, valence: 24, intensity: 92, acousticness: 28, density: 82, gloss: "flat-out rage at full tilt" },
-  menacing: { energy: 68, valence: 24, intensity: 74, acousticness: 20, density: 64, gloss: "threat held just below the surface" },
-  frantic: { energy: 90, valence: 42, intensity: 70, acousticness: 38, density: 70, gloss: "too fast to hold on to" },
-  savage: { energy: 88, valence: 20, intensity: 90, acousticness: 30, density: 80, gloss: "brutal and unpolished" },
-  // ── timbre-led: chosen for HOW it sounds, across the quadrants ──────────
-  heavy: { energy: 72, valence: 34, intensity: 82, acousticness: 32, density: 78, gloss: "downtuned mass; the low end dominates" },
-  gritty: { energy: 62, valence: 42, intensity: 62, acousticness: 45, density: 55, gloss: "dirt on the signal; unsmoothed" },
-  fuzzy: { energy: 58, valence: 48, intensity: 58, acousticness: 42, density: 60, gloss: "saturated and woolly-edged" },
-  glossy: { energy: 55, valence: 65, intensity: 40, acousticness: 15, density: 62, gloss: "polished studio sheen" },
-  shimmering: { energy: 45, valence: 66, intensity: 32, acousticness: 30, density: 55, gloss: "bright high-end, glittering" },
-  pulsing: { energy: 60, valence: 55, intensity: 45, acousticness: 12, density: 58, gloss: "steady synthetic throb" },
-  cold: { energy: 50, valence: 32, intensity: 50, acousticness: 15, density: 45, gloss: "clinical, unwarmed by the room" },
-  sparse: { energy: 28, valence: 45, intensity: 22, acousticness: 60, density: 12, gloss: "few elements, lots of silence" },
-  lush: { energy: 45, valence: 60, intensity: 35, acousticness: 55, density: 85, gloss: "many layers, richly filled in" },
-  raucous: { energy: 78, valence: 62, intensity: 68, acousticness: 45, density: 70, gloss: "loud, rowdy, spilling over" },
-  hypnotic: { energy: 45, valence: 48, intensity: 35, acousticness: 30, density: 50, gloss: "repetition that pulls you under" },
-  stark: { energy: 30, valence: 30, intensity: 35, acousticness: 45, density: 15, gloss: "bare and unsoftened" }
-};
-var MOOD_VOCABULARY = Object.keys(MOOD_ANCHORS);
-var CANON = new Set(Object.keys(MOOD_ANCHORS));
+var MOOD_VOCABULARY = [
+  "serene",
+  "tender",
+  "gentle",
+  "warm",
+  "mellow",
+  "pastoral",
+  "intimate",
+  "hushed",
+  "dreamy",
+  "melancholy",
+  "mournful",
+  "lonesome",
+  "bleak",
+  "weary",
+  "wistful",
+  "sunny",
+  "sweet",
+  "playful",
+  "breezy",
+  "groovy",
+  "funky",
+  "swinging",
+  "jaunty",
+  "moody",
+  "brooding",
+  "tense",
+  "restless",
+  "smouldering",
+  "defiant",
+  "euphoric",
+  "exuberant",
+  "triumphant",
+  "anthemic",
+  "driving",
+  "danceable",
+  "aggressive",
+  "furious",
+  "menacing",
+  "frantic",
+  "savage",
+  "heavy",
+  "gritty",
+  "fuzzy",
+  "glossy",
+  "shimmering",
+  "pulsing",
+  "cold",
+  "sparse",
+  "lush",
+  "raucous",
+  "hypnotic",
+  "stark"
+];
+var CANON = new Set(MOOD_VOCABULARY);
 var SYNONYMS = {
   angry: "furious",
   ferocious: "furious",
@@ -389,35 +306,23 @@ function canonicalise(raw) {
   if (SYNONYMS[squashed]) return SYNONYMS[squashed];
   return null;
 }
-var UNIVERSAL_VIBES = {
-  "wind down": { centre: { energy: 20, valence: 52, intensity: 14, acousticness: 78, density: 24 }, radius: 21, tempo: ["still", "slow"], hours: [21, 22, 23, 0, 1], gloss: "settling toward sleep" },
-  "slow morning": { centre: { energy: 32, valence: 62, intensity: 22, acousticness: 70, density: 34 }, radius: 19, tempo: ["slow", "mid"], hours: [6, 7, 8, 9], gloss: "easing into the day" },
-  "focus": { centre: { energy: 42, valence: 50, intensity: 28, acousticness: 40, density: 40 }, radius: 18, vocal: ["instrumental"], hours: [9, 10, 11, 14, 15, 16], gloss: "steady, undemanding, stays out of the way" },
-  "background": { centre: { energy: 38, valence: 58, intensity: 25, acousticness: 55, density: 38 }, radius: 18, hours: [11, 12, 13, 14], gloss: "pleasant and unobtrusive" },
-  "uplift": { centre: { energy: 68, valence: 80, intensity: 42, acousticness: 45, density: 58 }, radius: 21, valence: [55, 100], hours: [8, 9, 10, 16, 17], gloss: "a deliberate lift in mood" },
-  "workout": { centre: { energy: 84, valence: 62, intensity: 70, acousticness: 25, density: 72 }, radius: 20, tempo: ["driving", "frantic"], hours: [6, 7, 17, 18, 19], gloss: "sustained physical push" },
-  "hype": { centre: { energy: 86, valence: 70, intensity: 66, acousticness: 18, density: 74 }, radius: 24, valence: [50, 100], hours: [20, 21, 22], gloss: "getting up for something" },
-  "driving": { centre: { energy: 70, valence: 60, intensity: 58, acousticness: 40, density: 62 }, radius: 18, tempo: ["mid", "driving"], hours: [8, 9, 16, 17, 18], gloss: "motion; miles passing" },
-  "golden hour": { centre: { energy: 48, valence: 68, intensity: 32, acousticness: 55, density: 46 }, radius: 20, valence: [45, 100], hours: [17, 18, 19], gloss: "warm light, day easing off" },
-  "late night": { centre: { energy: 40, valence: 40, intensity: 38, acousticness: 35, density: 45 }, radius: 18, hours: [23, 0, 1, 2, 3], gloss: "after hours; low light" },
-  "melancholy": { centre: { energy: 28, valence: 24, intensity: 24, acousticness: 65, density: 32 }, radius: 22, valence: [0, 45], hours: [21, 22, 23], gloss: "sitting with something sad" },
-  "heavy": { centre: { energy: 80, valence: 32, intensity: 84, acousticness: 28, density: 78 }, radius: 24, valence: [0, 55], hours: [15, 16, 17, 21, 22], gloss: "loud, dark and physical" },
-  "dinner": { centre: { energy: 40, valence: 66, intensity: 26, acousticness: 68, density: 40 }, radius: 19, hours: [18, 19, 20], gloss: "convivial but not competing with conversation" },
-  "party": { centre: { energy: 80, valence: 82, intensity: 50, acousticness: 20, density: 72 }, radius: 23, valence: [55, 100], hours: [20, 21, 22, 23], gloss: "a room full of people" }
+var VIBE_SCHEDULE = {
+  "wind down": { hours: [21, 22, 23, 0, 1], gloss: "settling toward sleep" },
+  "slow morning": { hours: [5, 6, 7, 8, 9], gloss: "easing into the day" },
+  "focus": { hours: [9, 10, 11, 14, 15, 16], gloss: "steady, undemanding, stays out of the way" },
+  "background": { hours: [11, 12, 13, 14], gloss: "pleasant and unobtrusive" },
+  "uplift": { hours: [8, 9, 10, 16, 17], gloss: "a deliberate lift in mood" },
+  "workout": { hours: [6, 7, 17, 18, 19], gloss: "sustained physical push" },
+  "hype": { hours: [20, 21, 22], gloss: "getting up for something" },
+  "driving": { hours: [8, 9, 16, 17, 18], gloss: "motion; miles passing" },
+  "golden hour": { hours: [17, 18, 19], gloss: "warm light, day easing off" },
+  "late night": { hours: [23, 0, 1, 2, 3, 4], gloss: "after hours; low light" },
+  "melancholy": { hours: [21, 22, 23], gloss: "sitting with something sad" },
+  "heavy": { hours: [15, 16, 17, 21, 22], gloss: "loud, dark and physical" },
+  "dinner": { hours: [18, 19, 20], gloss: "convivial but not competing with conversation" },
+  "party": { hours: [20, 21, 22, 23], gloss: "a room full of people" }
 };
-var VIBE_NAMES = Object.keys(UNIVERSAL_VIBES);
-function vibesFor(p, max = 3) {
-  const out = [];
-  for (const [vibe, def] of Object.entries(UNIVERSAL_VIBES)) {
-    if (def.valence && (p.valence < def.valence[0] || p.valence > def.valence[1])) continue;
-    if (def.tempo && !def.tempo.includes(p.tempoFeel)) continue;
-    if (def.vocal && !def.vocal.includes(p.vocal)) continue;
-    const distance = numericDistance(p, def.centre);
-    if (distance > def.radius) continue;
-    out.push({ vibe, distance: Number(distance.toFixed(1)) });
-  }
-  return out.sort((a, b) => a.distance - b.distance).slice(0, max);
-}
+var VIBE_NAMES = Object.keys(VIBE_SCHEDULE);
 
 // src/daylist.ts
 var PART_OF_DAY = [
@@ -467,14 +372,14 @@ function vibeFits(store2, hour, spread = 1) {
   const windowShare = window.size / 24;
   const members = /* @__PURE__ */ new Map();
   for (const t of store2.tracks) {
-    for (const v of t.moodVibes ?? []) {
-      const arr = members.get(v.vibe);
+    for (const v of t.mood?.vibes ?? []) {
+      const arr = members.get(v);
       if (arr) arr.push(t);
-      else members.set(v.vibe, [t]);
+      else members.set(v, [t]);
     }
   }
   const out = [];
-  for (const [vibe, def] of Object.entries(UNIVERSAL_VIBES)) {
+  for (const [vibe, def] of Object.entries(VIBE_SCHEDULE)) {
     const tracks = members.get(vibe) ?? [];
     let inWindow = 0;
     let totalListens = 0;
@@ -937,8 +842,7 @@ function search(store2, p) {
     if (p.bpm_max !== void 0 && !(t.bpm && t.bpm <= p.bpm_max)) continue;
     if (p.starred !== void 0 && t.starred !== p.starred) continue;
     if (p.mood_vibes?.length) {
-      const regions = (t.moodVibes ?? []).map((g) => g.vibe);
-      if (!anyMatch([...regions, ...t.vibes], p.mood_vibes)) continue;
+      if (!anyMatch([...t.mood?.vibes ?? [], ...t.vibes], p.mood_vibes)) continue;
     }
     const needsMood = p.energy_min !== void 0 || p.energy_max !== void 0 || p.valence_min !== void 0 || p.valence_max !== void 0 || p.intensity_min !== void 0 || p.intensity_max !== void 0 || p.acousticness_min !== void 0 || p.acousticness_max !== void 0 || p.density_min !== void 0 || p.density_max !== void 0 || Boolean(p.tempo_feel?.length) || Boolean(p.vocal?.length) || Boolean(p.moods?.length) || Boolean(p.fits_time);
     if (needsMood) {
@@ -1083,7 +987,7 @@ function brief(t) {
       vocal: t.mood.vocal,
       moods: t.mood.moods,
       fits: t.mood.times,
-      vibes: t.moodVibes?.length ? t.moodVibes.map((v) => v.vibe) : void 0
+      vibes: t.mood.vibes.length ? t.mood.vibes : void 0
     } : void 0
   };
 }
@@ -1176,370 +1080,150 @@ var LastFm = class _LastFm {
   }
 };
 
-// src/mood.ts
-import Anthropic from "@anthropic-ai/sdk";
-var TIME_SLOTS = [
-  "early morning",
-  "morning",
-  "midday",
-  "afternoon",
-  "golden hour",
-  "evening",
-  "late night"
-];
-var BATCH = 40;
-var CONCURRENCY = Number(process.env.MOOD_CONCURRENCY ?? 32) || 32;
-var DEFAULT_MODEL = "claude-opus-5";
-function taxonomyPrompt() {
-  const axis = (name, lo, hi) => `  ${name.padEnd(13)} 0-100  ${lo} -> ${hi}`;
-  const lines = [
-    "You are labelling a music library so it can be searched and sequenced by mood.",
-    "",
-    "Judge each track on how it actually SOUNDS, not on its genre label, its lyrics, its",
-    "reputation or its popularity. Two tracks with the same label should be usable one after",
-    "the other without the transition feeling wrong.",
-    "",
-    "## Axes",
-    "",
-    axis("energy", "still and sleepy", "frantic activity"),
-    axis("valence", "bleak", "joyful"),
-    axis("intensity", "gentle", "heavy and aggressive"),
-    axis("acousticness", "fully electronic", "fully acoustic"),
-    axis("density", "sparse, one or two elements", "wall of sound"),
-    "",
-    `  tempoFeel     one of: ${TEMPO_FEELS.join(", ")}  (how fast it FEELS, not its BPM)`,
-    `  vocal         one of: ${VOCAL_KINDS.join(", ")}`,
-    "",
-    "Be decisive and use the full range -- clustering everything near 50 makes the labels",
-    "useless. `density` is about how much is happening at once: a solo voice is low even when",
-    "it is loud, a shoegaze wall is high even when it is calm.",
-    "",
-    "## Vocabulary",
-    "",
-    "Pick 2-4 `moods` from this list and nothing else. Each term is a fixed REGION of the",
-    "space above, given as its coordinates (E/V/I/A/D) and what it means. Choose the terms",
-    "whose regions your numbers actually land in -- the two should agree.",
-    ""
-  ];
-  for (const [term, a] of Object.entries(MOOD_ANCHORS)) {
-    const coords = `E${a.energy} V${a.valence} I${a.intensity} A${a.acousticness} D${a.density}`;
-    lines.push(`  ${term.padEnd(12)} ${coords.padEnd(28)} ${a.gloss}`);
+// src/moodspace.ts
+var TEMPO_FEELS = ["still", "slow", "mid", "driving", "frantic"];
+var VOCAL_KINDS = ["instrumental", "sung", "rapped", "mixed"];
+var W = {
+  intensity: 1.6,
+  acousticness: 1.4,
+  density: 1,
+  energy: 1,
+  valence: 0.45
+};
+var TEMPO_INDEX = {
+  still: 0,
+  slow: 1,
+  mid: 2,
+  driving: 3,
+  frantic: 4
+};
+var TEMPO_STEP_COST = 18;
+function vocalCost(a, b) {
+  if (a === b) return 0;
+  const pair = [a, b].sort().join("|");
+  switch (pair) {
+    case "mixed|sung":
+      return 4;
+    case "mixed|rapped":
+      return 8;
+    case "rapped|sung":
+      return 20;
+    case "instrumental|sung":
+      return 16;
+    case "instrumental|mixed":
+      return 18;
+    case "instrumental|rapped":
+      return 28;
+    default:
+      return 12;
   }
-  lines.push(
-    "",
-    "## Times of day",
-    "",
-    `  times  when the track fits, from: ${TIME_SLOTS.join(", ")}`,
-    "",
-    "Judge this by the sound, not by habit: quiet and spacious suits late night, bright and",
-    "propulsive suits morning. Give every track at least one.",
-    "",
-    "## Notes",
-    "",
-    "Do not guess at random. If a track is unfamiliar, infer from the artist, the album and",
-    "the era -- an informed placement is far more useful than a hedged one at 50.",
-    "Return one entry per track, preserving the given id exactly."
-  );
-  return lines.join("\n");
 }
-var SCHEMA = {
-  type: "object",
-  properties: {
-    tracks: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          id: { type: "string", description: "The track id exactly as given." },
-          energy: { type: "integer", description: "0-100, still to frantic." },
-          valence: { type: "integer", description: "0-100, bleak to joyful." },
-          intensity: { type: "integer", description: "0-100, gentle to aggressive." },
-          acousticness: { type: "integer", description: "0-100, electronic to acoustic." },
-          density: { type: "integer", description: "0-100, sparse to wall-of-sound." },
-          tempoFeel: {
-            type: "string",
-            enum: [...TEMPO_FEELS],
-            description: "How fast the track feels."
-          },
-          vocal: { type: "string", enum: [...VOCAL_KINDS] },
-          moods: {
-            type: "array",
-            items: { type: "string", enum: [...MOOD_VOCABULARY] },
-            minItems: 2,
-            maxItems: 4,
-            description: "2-4 terms from the vocabulary, matching the axes given."
-          },
-          times: {
-            type: "array",
-            items: { type: "string", enum: [...TIME_SLOTS] },
-            minItems: 1,
-            description: "Times of day the track fits."
-          }
-        },
-        required: [
-          "id",
-          "energy",
-          "valence",
-          "intensity",
-          "acousticness",
-          "density",
-          "tempoFeel",
-          "vocal",
-          "moods",
-          "times"
-        ],
-        additionalProperties: false
-      }
-    }
-  },
-  required: ["tracks"],
-  additionalProperties: false
-};
-function describe(t) {
-  const bits = [
-    `id=${t.id}`,
-    `${t.artist} \u2014 ${t.title}`,
-    t.year ? `(${t.year})` : "",
-    t.album ? `album: ${t.album}` : "",
-    t.genres.length ? `genre: ${t.genres.join("/")}` : "",
-    t.tags.length ? `tags: ${t.tags.slice(0, 8).map((x) => x.name).join(", ")}` : ""
-  ].filter(Boolean);
-  return bits.join(" | ");
+function numericDistance(a, b) {
+  const sq = W.intensity * (a.intensity - b.intensity) ** 2 + W.acousticness * (a.acousticness - b.acousticness) ** 2 + W.density * (a.density - b.density) ** 2 + W.energy * (a.energy - b.energy) ** 2 + W.valence * (a.valence - b.valence) ** 2;
+  const totalW = W.intensity + W.acousticness + W.density + W.energy + W.valence;
+  return Math.sqrt(sq / totalW);
 }
-var PRICES = {
-  "claude-opus-5": { in: 5, out: 25 },
-  "claude-sonnet-5": { in: 3, out: 15 },
-  "claude-haiku-4-5": { in: 1, out: 5 }
-};
-var MoodEnricher = class {
-  client;
-  model;
-  progress = {
-    running: false,
-    done: 0,
-    total: 0,
-    cachedTokens: 0,
-    note: "idle",
-    usage: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, batches: 0 },
-    costSoFar: 0,
-    projectedTotal: 0,
-    discounted: false
+function moodDistance(a, b) {
+  const tempo = Math.abs(TEMPO_INDEX[a.tempoFeel] - TEMPO_INDEX[b.tempoFeel]) * TEMPO_STEP_COST;
+  return numericDistance(a, b) + tempo + vocalCost(a.vocal, b.vocal);
+}
+function centroid(points) {
+  if (!points.length) return null;
+  const mean = (f) => points.reduce((s, p) => s + f(p), 0) / points.length;
+  const tempos = points.map((p) => TEMPO_INDEX[p.tempoFeel]).sort((x, y) => x - y);
+  const tIdx = tempos[Math.floor(tempos.length / 2)];
+  const vocalCounts = /* @__PURE__ */ new Map();
+  for (const p of points) vocalCounts.set(p.vocal, (vocalCounts.get(p.vocal) ?? 0) + 1);
+  const vocal = [...vocalCounts.entries()].sort((x, y) => y[1] - x[1])[0][0];
+  const moodCounts = /* @__PURE__ */ new Map();
+  for (const p of points) for (const m of p.moods) moodCounts.set(m, (moodCounts.get(m) ?? 0) + 1);
+  return {
+    energy: mean((p) => p.energy),
+    valence: mean((p) => p.valence),
+    intensity: mean((p) => p.intensity),
+    acousticness: mean((p) => p.acousticness),
+    density: mean((p) => p.density),
+    tempoFeel: TEMPO_FEELS[tIdx],
+    vocal,
+    moods: [...moodCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([m]) => m)
   };
-  /** Cost of the usage recorded so far, at this model's published rates. */
-  cost(u) {
-    const p = PRICES[this.model] ?? PRICES["claude-opus-5"];
-    const inTok = u.input + u.cacheWrite * 1.25 + u.cacheRead * 0.1;
-    const gross = inTok / 1e6 * p.in + u.output / 1e6 * p.out;
-    return this.progress.discounted ? gross / 2 : gross;
-  }
-  constructor(apiKey, model) {
-    this.client = new Anthropic(apiKey ? { apiKey } : {});
-    this.model = model || DEFAULT_MODEL;
-  }
-  async labelBatch(system, batch) {
-    const res = await this.client.messages.create({
-      model: this.model,
-      max_tokens: 8e3,
-      // Classification, not reasoning: thinking would multiply the cost of a
-      // pass this wide for no gain. Disabling it is permitted at effort `high`
-      // or below, and the JSON schema constrains the output shape either way.
-      thinking: { type: "disabled" },
-      output_config: {
-        effort: "low",
-        format: { type: "json_schema", schema: SCHEMA }
-      },
-      system: [
-        {
-          type: "text",
-          text: system,
-          // The taxonomy block is identical on every request and dwarfs the
-          // per-batch track list, so caching it turns the dominant cost into a
-          // cache read after the first call.
-          cache_control: { type: "ephemeral" }
-        }
-      ],
-      messages: [
-        {
-          role: "user",
-          content: `Label these ${batch.length} tracks:
+}
+function spreadRadius(points, quantile = 0.75) {
+  const c = centroid(points);
+  if (!c || points.length < 2) return 0;
+  const ds = points.map((p) => moodDistance(p, c)).sort((a, b) => a - b);
+  return ds[Math.min(ds.length - 1, Math.floor(ds.length * quantile))];
+}
 
-${batch.map(describe).join("\n")}`
-        }
-      ]
-    });
-    const u = res.usage;
-    const usage = {
-      input: u.input_tokens ?? 0,
-      cacheWrite: u.cache_creation_input_tokens ?? 0,
-      cacheRead: u.cache_read_input_tokens ?? 0,
-      output: u.output_tokens ?? 0
-    };
-    const text = res.content.find((b) => b.type === "text");
-    if (!text || text.type !== "text") return { rows: [], usage };
-    const parsed = JSON.parse(text.text);
-    return { rows: parsed.tracks ?? [], usage };
-  }
-  /** The request body shared by both the sync and batched paths. */
-  params(system, batch) {
-    return {
-      model: this.model,
-      max_tokens: 8e3,
-      thinking: { type: "disabled" },
-      output_config: {
-        effort: "low",
-        format: { type: "json_schema", schema: SCHEMA }
-      },
-      system: [
-        { type: "text", text: system, cache_control: { type: "ephemeral" } }
-      ],
-      messages: [
-        {
-          role: "user",
-          content: `Label these ${batch.length} tracks:
-
-${batch.map(describe).join("\n")}`
-        }
-      ]
-    };
-  }
-  /**
-   * Label everything via the Message Batches API.
-   *
-   * Measured on this library, the synchronous path costs ~$27.50 for 9,311
-   * tracks on Opus -- output is ~78% of that and prompt caching cannot touch it.
-   * Batching is 50% off every token, which halves it, and the trade it asks for
-   * (asynchronous, typically under an hour) costs nothing for a one-time offline
-   * enrichment. So this is the default for a full run; the synchronous path is
-   * kept for small trial runs where waiting on a queue is the worse deal.
-   */
-  async runBatched(pending, onBatch) {
-    const system = taxonomyPrompt();
-    const batches = [];
-    for (let i = 0; i < pending.length; i += BATCH) batches.push(pending.slice(i, i + BATCH));
-    this.progress = {
-      running: true,
-      done: 0,
-      total: pending.length,
-      cachedTokens: 0,
-      note: `submitting ${batches.length} batches to the Batch API (${this.model})`,
-      usage: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, batches: 0 },
-      costSoFar: 0,
-      projectedTotal: 0,
-      batchId: void 0,
-      discounted: true
-    };
-    try {
-      const created = await this.client.messages.batches.create({
-        requests: batches.map((b, i) => ({
-          custom_id: `b${i}`,
-          params: this.params(system, b)
-        }))
-      });
-      this.progress.batchId = created.id;
-      this.progress.note = `queued as ${created.id}; polling`;
-      console.error(`[navidrome-mcp] mood: submitted batch ${created.id} (${batches.length} requests)`);
-      let status = created.processing_status;
-      for (let i = 0; i < 3e3 && status !== "ended"; i++) {
-        await new Promise((r) => setTimeout(r, 2e4));
-        const b = await this.client.messages.batches.retrieve(created.id);
-        status = b.processing_status;
-        const c = b.request_counts;
-        this.progress.note = `${status}: ${c.succeeded} ok, ${c.processing} running, ${c.errored} errored`;
-        this.progress.done = Math.min(pending.length, c.succeeded * BATCH);
-      }
-      if (status !== "ended") throw new Error(`batch ${created.id} did not finish in time`);
-      const acc = this.progress.usage;
-      let done = 0;
-      for await (const entry of await this.client.messages.batches.results(created.id)) {
-        if (entry.result.type !== "succeeded") {
-          console.error(`[navidrome-mcp] mood: ${entry.custom_id} ${entry.result.type}`);
-          continue;
-        }
-        const msg = entry.result.message;
-        const u = msg.usage;
-        acc.input += u.input_tokens ?? 0;
-        acc.cacheWrite += u.cache_creation_input_tokens ?? 0;
-        acc.cacheRead += u.cache_read_input_tokens ?? 0;
-        acc.output += u.output_tokens ?? 0;
-        acc.batches += 1;
-        const text = msg.content.find((b) => b.type === "text");
-        if (!text || text.type !== "text") continue;
-        try {
-          const parsed = JSON.parse(text.text);
-          const rows = parsed.tracks ?? [];
-          done += rows.length;
-          await onBatch(rows);
-        } catch (e) {
-          console.error(`[navidrome-mcp] mood: unparseable result ${entry.custom_id}: ${String(e)}`);
-        }
-      }
-      this.progress.done = done;
-      this.progress.costSoFar = Number(this.cost(acc).toFixed(4));
-      this.progress.note = `done (${done} labelled)`;
-    } finally {
-      this.progress.running = false;
-    }
-  }
-  /**
-   * Label every track that does not already have a mood.
-   *
-   * Resumable: the caller persists as it goes, so a crash or restart costs only
-   * the batch in flight.
-   */
-  async run(store2, pending, onBatch) {
-    const system = taxonomyPrompt();
-    const batches = [];
-    for (let i = 0; i < pending.length; i += BATCH) batches.push(pending.slice(i, i + BATCH));
-    this.progress = {
-      running: true,
-      done: 0,
-      total: pending.length,
-      cachedTokens: 0,
-      note: `${batches.length} batches on ${this.model}, ${CONCURRENCY}-way`,
-      usage: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, batches: 0 },
-      costSoFar: 0,
-      projectedTotal: 0,
-      discounted: false
-    };
-    const libraryTotal = store2.tracks.filter((t) => !t.mood && !t.missing).length;
-    const runOne = async (batch) => {
-      try {
-        const { rows, usage } = await this.labelBatch(system, batch);
-        const acc = this.progress.usage;
-        acc.input += usage.input;
-        acc.cacheWrite += usage.cacheWrite;
-        acc.cacheRead += usage.cacheRead;
-        acc.output += usage.output;
-        acc.batches += 1;
-        this.progress.cachedTokens += usage.cacheRead;
-        this.progress.costSoFar = Number(this.cost(acc).toFixed(4));
-        const perTrack = this.cost(acc) / Math.max(1, acc.batches * BATCH);
-        this.progress.projectedTotal = Number((perTrack * libraryTotal).toFixed(2));
-        await onBatch(rows);
-      } catch (e) {
-        console.error(`[navidrome-mcp] mood batch failed: ${String(e)}`);
-      } finally {
-        this.progress.done += batch.length;
-      }
-    };
-    if (batches.length) await runOne(batches[0]);
-    let next = 1;
-    await Promise.all(
-      Array.from({ length: Math.min(CONCURRENCY, Math.max(0, batches.length - 1)) }, async () => {
-        for (; ; ) {
-          const i = next++;
-          if (i >= batches.length) return;
-          await runOne(batches[i]);
-        }
-      })
-    );
-    this.progress.running = false;
-    this.progress.note = "done";
-  }
+// src/moodtags.ts
+var TAGS = {
+  moods: "mood",
+  energy: "moodenergy",
+  valence: "moodvalence",
+  intensity: "moodintensity",
+  acousticness: "moodacousticness",
+  density: "mooddensity",
+  tempo: "moodtempo",
+  vocal: "moodvocal",
+  times: "moodtime",
+  vibes: "vibe"
 };
+var MOOD_TAG_NAMES = Object.values(TAGS);
+function first(tags, name) {
+  const v = tags?.[name];
+  return v && v.length ? v[0] : void 0;
+}
+function axis(tags, name) {
+  const raw = first(tags, name);
+  if (raw === void 0) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 100) return null;
+  return Math.round(n);
+}
+function oneOf(tags, name, allowed) {
+  const raw = first(tags, name)?.trim().toLowerCase();
+  return raw && allowed.includes(raw) ? raw : null;
+}
+function moodFromTags(tags) {
+  if (!tags) return null;
+  const energy = axis(tags, TAGS.energy);
+  const valence = axis(tags, TAGS.valence);
+  const intensity = axis(tags, TAGS.intensity);
+  const acousticness = axis(tags, TAGS.acousticness);
+  const density = axis(tags, TAGS.density);
+  const tempoFeel = oneOf(tags, TAGS.tempo, TEMPO_FEELS);
+  const vocal = oneOf(tags, TAGS.vocal, VOCAL_KINDS);
+  if (energy === null || valence === null || intensity === null || acousticness === null || density === null || tempoFeel === null || vocal === null) {
+    return null;
+  }
+  const moods = [];
+  for (const raw of tags[TAGS.moods] ?? []) {
+    const c = canonicalise(raw);
+    if (c && !moods.includes(c)) moods.push(c);
+  }
+  return {
+    energy,
+    valence,
+    intensity,
+    acousticness,
+    density,
+    tempoFeel,
+    vocal,
+    moods,
+    times: (tags[TAGS.times] ?? []).map((t) => t.trim().toLowerCase()).filter(Boolean),
+    vibes: (tags[TAGS.vibes] ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean)
+  };
+}
+function moodDiagnosis(total, labelled, anyMoodTag) {
+  if (labelled > 0) return `${labelled} of ${total} tracks are mood-labelled.`;
+  if (!anyMoodTag) {
+    return "No mood tags exist in this library, so every mood filter will match nothing. Mood data comes from the navidrome-mood plugin, which labels tracks and writes the tags into the audio files; this server only reads them. Install and run it, then call refresh_index.";
+  }
+  return `Mood tags are present but none parsed into a complete label. The numeric axes (${TAGS.energy}, ${TAGS.valence}, ${TAGS.intensity}, ${TAGS.acousticness}, ${TAGS.density}) plus ${TAGS.tempo} and ${TAGS.vocal} are all required. The usual cause is that Navidrome's mappings.yaml does not register them, so it indexes the MOOD words and drops the rest.`;
+}
 
 // src/store.ts
-var SNAPSHOT_VERSION = 5;
+var SNAPSHOT_VERSION = 6;
 function log(msg) {
   console.error(`[navidrome-mcp] ${msg}`);
 }
@@ -1553,7 +1237,6 @@ var Store = class {
     this.opts = opts;
     this.lastfm = new LastFm(opts.lastFmKey, opts.externalDispatcher);
     this.lb = opts.listenBrainzUser ? new ListenBrainz(opts.listenBrainzUser, opts.externalDispatcher) : null;
-    this.mood = opts.anthropicKey ? new MoodEnricher(opts.anthropicKey, opts.moodModel) : null;
   }
   opts;
   tracks = [];
@@ -1567,8 +1250,6 @@ var Store = class {
   listensSyncedAt = 0;
   trackTags = {};
   artistTags = {};
-  moods = {};
-  mood;
   taggedTracks = /* @__PURE__ */ new Set();
   taggedArtists = /* @__PURE__ */ new Set();
   lastfm;
@@ -1615,7 +1296,6 @@ var Store = class {
       this.artistTags = s.artistTags ?? {};
       this.taggedTracks = new Set(s.taggedTracks ?? []);
       this.taggedArtists = new Set(s.taggedArtists ?? []);
-      this.moods = s.moods ?? {};
       this.daylistRuns = s.daylistRuns ?? [];
       this.listens = (s.listenTs ?? []).map((ts, i) => {
         const key = s.listenKeys[s.listenKi[i]] ?? " ";
@@ -1678,7 +1358,6 @@ var Store = class {
       listenKi,
       taggedTracks: [...this.taggedTracks],
       taggedArtists: [...this.taggedArtists],
-      moods: this.moods,
       daylistRuns: this.daylistRuns.slice(-200)
     };
     await mkdir(dirname(this.snapshotPath), { recursive: true });
@@ -1806,12 +1485,12 @@ var Store = class {
         firstListen: 0,
         hourHist: [],
         dowHist: [],
-        nkey: matchKey(primaryArtist(artist), title)
+        nkey: matchKey(primaryArtist(artist), title),
+        mood: moodFromTags(s.tags) ?? void 0
       };
     });
     this.byId = new Map(this.tracks.map((t) => [t.id, t]));
     this.applyTags();
-    this.applyMoods();
     this.applyListenStats();
   }
   applyTags() {
@@ -1825,52 +1504,32 @@ var Store = class {
       t.tags = at ? at.slice(0, 10) : [];
     }
   }
-  /** Attach mood labels and the vibe membership that falls out of them. */
-  applyMoods() {
-    for (const t of this.tracks) {
-      t.mood = this.moods[t.id];
-      t.moodVibes = t.mood ? vibesFor(t.mood) : void 0;
-    }
-  }
-  /** How many tracks land in each vibe region. */
+  /** How many tracks land in each vibe region, per the plugin's `vibe` tag. */
   vibeHistogram() {
     const counts = /* @__PURE__ */ new Map();
     for (const t of this.tracks) {
-      for (const v of t.moodVibes ?? []) counts.set(v.vibe, (counts.get(v.vibe) ?? 0) + 1);
+      for (const v of t.mood?.vibes ?? []) counts.set(v, (counts.get(v) ?? 0) + 1);
     }
     return [...counts.entries()].map(([vibe, tracks]) => ({ vibe, tracks })).sort((a, b) => b.tracks - a.tracks);
   }
-  /** How much of the library has a mood label yet. */
-  moodCoverage() {
-    return {
-      labelled: this.tracks.filter((t) => t.mood).length,
-      total: this.tracks.length,
-      progress: this.mood?.progress ?? { running: false, note: "no ANTHROPIC_API_KEY" }
-    };
-  }
   /**
-   * Label every unlabelled track. One-time in practice: results persist to the
-   * snapshot, so later runs only pick up newly-added music.
+   * How much of the library carries a usable mood label.
+   *
+   * Reports *why* when the answer is none. "0 labelled" reads identically
+   * whether the plugin was never installed, ran but wrote nothing, or wrote tags
+   * Navidrome then dropped for want of a mappings.yaml entry -- and those need
+   * three different fixes.
    */
-  async enrichMoods(limit, mode) {
-    if (!this.mood) return { started: 0, mode: "none" };
-    if (this.mood.progress.running) return { started: 0, mode: "already-running" };
-    let pending = this.tracks.filter((t) => !t.mood && !t.missing);
-    if (limit && limit > 0) pending = pending.slice(0, limit);
-    if (!pending.length) return { started: 0, mode: "nothing-pending" };
-    const useBatch = mode === "batch" || mode !== "sync" && pending.length > 200;
-    log(`mood: labelling ${pending.length} tracks (${useBatch ? "batch API" : "sync"})`);
-    const onRows = async (rows) => {
-      for (const r of rows) {
-        if (!this.byId.has(r.id)) continue;
-        const { id, ...m } = r;
-        this.moods[id] = m;
-      }
-      this.applyMoods();
-      await this.saveSnapshotSoon();
+  moodCoverage() {
+    const labelled = this.tracks.filter((t) => t.mood).length;
+    const anyMoodTag = this.rawSongs.some(
+      (s) => MOOD_TAG_NAMES.some((n) => (s.tags?.[n]?.length ?? 0) > 0)
+    );
+    return {
+      labelled,
+      total: this.tracks.length,
+      note: moodDiagnosis(this.tracks.length, labelled, anyMoodTag)
     };
-    void (useBatch ? this.mood.runBatched(pending, onRows) : this.mood.run(this, pending, onRows)).then(() => log(`mood: finished, ${this.tracks.filter((t) => t.mood).length} labelled`)).catch((e) => log(`mood: failed: ${String(e)}`));
-    return { started: pending.length, mode: useBatch ? "batch" : "sync" };
   }
   /**
    * Fold the listen history onto the library.
@@ -2054,12 +1713,7 @@ var store = new Store({
   timezone: TZ,
   daylistName: DAYLIST_NAME,
   historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 730) || 730,
-  enrich: env.NAVIDROME_ENRICH !== "0",
-  // Prefer a navidrome-specific key so this budget is separate from the shared
-  // ANTHROPIC_API_KEY that rocketmoney also uses, and either can be rotated
-  // without disturbing the other. Falls back to the shared key.
-  anthropicKey: env.NAVIDROME_ANTHROPIC_KEY || env.ANTHROPIC_API_KEY,
-  moodModel: env.MOOD_MODEL
+  enrich: env.NAVIDROME_ENRICH !== "0"
 });
 function result(summary, data) {
   const text = data === void 0 ? summary : `${summary}
@@ -2124,14 +1778,14 @@ server.registerTool(
         },
         tag_enrichment: store.enrichState,
         mood_coverage: coverage,
-        vibe_regions: Object.entries(UNIVERSAL_VIBES).map(([vibe, d]) => ({
+        vibe_regions: Object.entries(VIBE_SCHEDULE).map(([vibe, d]) => ({
           vibe,
           gloss: d.gloss,
           tracks: regionCounts.get(vibe) ?? 0
         })),
         mood_vocabulary: store.moodVocabulary(60),
         curated_playlists: playlists.length ? playlists : void 0,
-        note: labelled === 0 ? "No tracks are mood-labelled yet, so the mood axes, `mood_vibes` and `fits_time` will match nothing. Run `enrich_moods` first, or fall back to genres, tags and listening history." : "Vibe regions are fixed definitions in mood-space, not this library's playlists, so `mood_vibes` means the same thing everywhere. `vibes` is different: it matches only tracks the listener filed onto a playlist by hand, which most libraries have little or none of." + (playlists.length ? "" : " This library has no curated playlists, so `vibes` will match nothing.")
+        note: labelled === 0 ? coverage.note + " Until then, fall back to genres, tags and listening history." : "Vibe regions are fixed definitions in mood-space, not this library's playlists, so `mood_vibes` means the same thing everywhere. `vibes` is different: it matches only tracks the listener filed onto a playlist by hand, which most libraries have little or none of." + (playlists.length ? "" : " This library has no curated playlists, so `vibes` will match nothing.")
       }
     );
   })
@@ -2253,10 +1907,10 @@ server.registerTool(
       return result(`No vibe region or playlist named "${vibe}". Known: ${known}`);
     }
     const key = region ?? playlist;
-    const tracks = region ? store.tracks.filter((t) => t.moodVibes?.some((v) => v.vibe === region)) : store.vibes[playlist].map((id) => store.byId.get(id)).filter(Boolean);
+    const tracks = region ? store.tracks.filter((t) => t.mood?.vibes.includes(region)) : store.vibes[playlist].map((id) => store.byId.get(id)).filter(Boolean);
     if (!tracks.length) {
       return result(
-        region ? `No tracks fall in the "${key}" region yet. ${store.moodCoverage().labelled} of ${store.tracks.length} tracks are mood-labelled; run enrich_moods if that is zero.` : `Playlist "${key}" is empty.`
+        region ? `No tracks fall in the "${key}" region. ${store.moodCoverage().note}` : `Playlist "${key}" is empty.`
       );
     }
     const points = tracks.map((t) => t.mood).filter((m) => Boolean(m));
@@ -2276,7 +1930,7 @@ server.registerTool(
       {
         vibe: key,
         kind: region ? "vibe region" : "curated playlist",
-        gloss: region ? UNIVERSAL_VIBES[region].gloss : void 0,
+        gloss: region ? VIBE_SCHEDULE[region].gloss : void 0,
         tracks: tracks.length,
         // Where this library's take on the vibe actually sits, and how tightly
         // it holds together -- a wide spread means the region is catching things
@@ -2724,25 +2378,16 @@ server.registerTool(
 );
 var lastDaylistId;
 server.registerTool(
-  "enrich_moods",
+  "mood_coverage",
   {
-    title: "Label the library's moods",
-    description: "Run (or check) the one-time pass that places EVERY track in mood-space: energy, valence, intensity, acousticness, density, how fast it feels, whether it is sung, which vocabulary terms describe it, and what times of day it fits.\n\nThis is the prerequisite for every mood filter, for vibe regions, and for cohesion \u2014 a library's own metadata cannot support them, since genres are a few dozen coarse buckets and BPM/ReplayGain/MusicBrainz IDs are present on under 3% of files. Results are cached permanently, so this normally runs once and then only picks up newly-added music.",
-    inputSchema: {
-      limit: z.number().int().optional().describe("Only label this many tracks (useful for a cheap trial run). Omit for all."),
-      status_only: z.boolean().optional().describe("Just report coverage without starting a run."),
-      mode: z.enum(["sync", "batch"]).optional().describe(
-        "'sync' runs in parallel now (~12 min for the full library, full price). 'batch' uses the Message Batches API at 50% off but is asynchronous (usually under an hour, 24h ceiling). Defaults to sync."
-      )
-    }
+    title: "Check mood labelling coverage",
+    description: "How much of the library carries a usable mood label, and what to do when the answer is none.\n\nThis server does not label anything. Mood comes from the `navidrome-mood` plugin, which runs inside Navidrome, judges each track and writes the values into the audio files as tags. That is what makes them visible to Navidrome's own smart playlists and to every Subsonic client, not just to this server.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true }
   },
-  tool(async ({ limit, status_only, mode }) => {
-    if (status_only) return result("Mood coverage.", store.moodCoverage());
-    const { started, mode: used } = await store.enrichMoods(limit, mode ?? "sync");
-    return result(
-      started ? `Started labelling ${started} tracks (${used}). Poll with status_only.` : "Nothing to label (already covered, already running, or no API key).",
-      store.moodCoverage()
-    );
+  tool(async () => {
+    const c = store.moodCoverage();
+    return result(c.note, { ...c, tags_read: MOOD_TAG_NAMES });
   })
 );
 server.registerTool(

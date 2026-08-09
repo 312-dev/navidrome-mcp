@@ -231,8 +231,7 @@ export function search(store: Store, p: SearchParams): { total: number; tracks: 
     // playlists are unioned in where they happen to share a name with a region,
     // so a listener who already files under "late night" keeps that filing.
     if (p.mood_vibes?.length) {
-      const regions = (t.moodVibes ?? []).map((g) => g.vibe);
-      if (!anyMatch([...regions, ...t.vibes], p.mood_vibes)) continue;
+      if (!anyMatch([...(t.mood?.vibes ?? []), ...t.vibes], p.mood_vibes)) continue;
     }
 
     // Mood-axis filters. A track with no mood yet cannot satisfy one, so it
@@ -415,7 +414,7 @@ export function brief(t: Track): Record<string, unknown> {
           vocal: t.mood.vocal,
           moods: t.mood.moods,
           fits: t.mood.times,
-          vibes: t.moodVibes?.length ? t.moodVibes.map((v) => v.vibe) : undefined,
+          vibes: t.mood.vibes.length ? t.mood.vibes : undefined,
         }
       : undefined,
   };

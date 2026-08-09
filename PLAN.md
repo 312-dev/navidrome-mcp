@@ -12,18 +12,50 @@ not the product.
 Nothing in the design may assume a particular user's library, playlists, or
 listening history. Those are optional enrichment, never the foundation.
 
-## The two halves
+## The two halves, and which way the arrow points
 
-| | `navidrome-mcp` (this repo) | `navidrome-mood` (`~/repos/navidrome-mood`) |
+| | `navidrome-mood` (`~/repos/navidrome-mood`) | `navidrome-mcp` (this repo) |
 |---|---|---|
-| What | MCP connector, TypeScript | Navidrome WASM plugin, Go |
-| Runs | Hetzner gateway, port 8012 | Inside Navidrome on the Mac Mini |
-| Owns | Prompt parsing, selection, sequencing | **Labelling**, writes mood tags into Navidrome |
-| State | deployed; v1 labels to be discarded | installed + enabled, **has never written a tag** |
+| What | Navidrome WASM plugin, Go | MCP connector, TypeScript |
+| Runs | Inside Navidrome on the Mac Mini | Hetzner gateway, port 8012 |
+| Owns | **All enrichment.** Vocabulary, regions, the LLM pass, tag writing | **All querying.** Selection, cohesion, sequencing, playlist writing |
+| Needs the other? | **No. Ever.** | For mood data, yes |
+| State | installed + enabled, **has never written a tag** | deployed; v1 labels discarded at snapshot v5 |
 
-**Architecture, locked:** the plugin labels and writes tags; the connector reads
-those tags and owns everything downstream. Tags outlive the connector, and Music
-Assistant plus every Subsonic client can read them.
+**The dependency runs one way, and only one way.**
+
+The plugin is standalone and complete on its own. It labels the library and
+writes tags into the audio files, and that is useful with no connector anywhere
+in the picture: Navidrome's own smart playlists filter on those tags, Music
+Assistant reads them, so does every Subsonic client. It knows nothing about MCP.
+
+The connector is a pure consumer. It carries **no enrichment logic at all** — no
+LLM client, no API key, no labelling prompt, no vocabulary derivation. If you
+want mood-aware playlists, you install the plugin; if the plugin is not
+installed, the connector says so plainly and its non-mood tools keep working.
+
+What that forbids, concretely: the connector must never grow a second way to
+obtain a mood. The one it had (`src/mood.ts`, a full Anthropic batching pipeline)
+is deleted, not kept as a fallback. A fallback is how you end up maintaining the
+same vocabulary in two languages and shipping two answers for one question.
+
+### Which side owns what
+
+The split is not "the plugin does data, the connector does logic". It is
+**by question**:
+
+| Question | Owner | Why |
+|---|---|---|
+| What does this track sound like? | plugin | It is the one with the files and the LLM |
+| Which vocabulary terms exist, and where do they sit? | plugin | It writes them |
+| Which region does this track fall in? | plugin | Computed from its own anchors, written as a `vibe` tag so Navidrome can filter on it too |
+| Do these two tracks sit well together? | connector | Sequencing is not the labeller's job |
+| What suits 7am? | connector | Scheduling is a playlist concern; the plugin has no opinion about clocks |
+| Did the user mean `mellow` when they typed `chill`? | connector | Query-side input folding |
+
+So the connector keeps `moodspace.ts` (distance, centroid, sequencing) and a
+region-to-hours table, and keeps a generated term/synonym list for folding user
+input. It keeps no anchors, no radii, and no way to produce a label.
 
 ## Static playlists are the default
 
@@ -84,32 +116,73 @@ enforce a requirement on one — so affect-named regions now carry a valence bou
 alongside the existing tempo/vocal ones. Both are recorded in `DESIGN-mood-v2.md`
 and asserted by `check:vocab`.
 
-## Phase 1 — Schema v2 into the plugin
+## Phase 1 — Connector stops enriching
 
-The connector now defines the schema; this ports it to the Go side.
+Makes the architecture true in the code rather than only in this file. No
+dependency on the plugin being finished: v1 labels were already discarded at
+snapshot v5, so there is nothing to regress.
 
-- [ ] Add `density`, `tempo_feel` (`still|slow|mid|driving|frantic`), `vocal`
-      (`instrumental|sung|rapped|mixed`)
-- [ ] Rename `organic` → `acousticness`
-- [ ] Replace the plugin's built-in 60-word vocabulary. **It was selected by
-      frequency** — its own source comments read "high frequency (300+)" — so it
-      kept `nostalgic`, `cinematic`, `raw`, `hypnotic`, `rowdy`, every word that
-      measured as spanning the whole space. Port the 52 anchored terms and 146
-      synonyms from `src/vocabulary.ts`, and put the anchors and glosses in the
-      prompt so the labeller places tracks against definitions.
-- [ ] Write the numeric axes as tags, not just `MOOD` words. Today it only calls
-      `WriteMood(path, canonical)`; without the axes the cohesion engine has
-      nothing to compute distance from.
+- [ ] **Delete `src/mood.ts`** — `MoodEnricher`, the Anthropic client, batching,
+      the Batch API path, cost tracking, the labelling prompt and its schema
+- [ ] Delete the `enrich_moods` tool and `Store.enrichMoods`
+- [ ] Drop the `@anthropic-ai/sdk` dependency, `NAVIDROME_ANTHROPIC_KEY` and
+      `ANTHROPIC_API_KEY`, and remove them from the gateway's supervisord entry
+- [ ] Move `MOOD_ANCHORS` and the region geometry (centres, radii, valence/tempo/
+      vocal bounds) **out** — that is the plugin's to own. Keep `moodspace.ts`,
+      the region-to-`hours` table, and a generated term/synonym list for folding
+      query input
+- [ ] Read `Mood` from `NdSong.tags` instead of the snapshot's `moods` map, and
+      drop that map from the snapshot
+- [ ] Where no mood tags are present, every mood tool says so and names the
+      plugin. Silence would look like an empty library.
+
+**Exit:** `grep -ri anthropic src/` is empty, and the connector has no path to
+produce a label.
+
+## Phase 2 — Plugin becomes the enrichment authority
+
+- [ ] Port the 52 anchored terms, 146 synonyms and 14 regions into Go as the
+      canonical vocabulary. **The existing 60 words were selected by frequency** —
+      the source comments read "high frequency (300+)" — so they kept
+      `nostalgic`, `cinematic`, `raw`, `hypnotic`, `rowdy`, every word measured
+      as spanning the whole space.
+- [ ] Rebuild `internal/prompt` from anchors and glosses. It currently opens
+      "The listener has hand-curated playlists that ARE his mood vocabulary" and
+      samples tracks from them — the same defect the connector just shed.
+- [ ] Schema v2: add `density`, `tempo_feel`, `vocal`; rename `organic` →
+      `acousticness`
+- [ ] Write the numeric axes, `tempo`, `vocal` and `vibe` as tags, not only
+      `MOOD` words. Today it calls `WriteMood(path, canonical)` and nothing else,
+      so the cohesion engine would have nothing to measure.
+- [ ] Ship a `mappings.yaml` snippet and a README covering standalone use —
+      numeric tags need registering via `criteria.AddNumericTags()` before a
+      smart playlist can filter on them
+- [ ] Fix the manifest: it promises "keeps natural-language playlists refreshed
+      on a schedule" and no such code exists
+- [ ] Drop the Subsonic playlist-reading permission if the prompt no longer
+      needs it — a smaller permission surface is part of standing alone
 - [ ] Sweep the plugin's comments/docs for drift (hard rule)
 
-**Exit:** a sample run writes real tags visible in `/api/tag`, and `mood=*`
-returns non-zero.
+**Exit:** a sample run writes real tags visible in `/api/tag`, `mood=*` returns
+non-zero, and a Navidrome smart playlist filters on one of the numeric axes.
 
-## Phase 2 — Relabel
+## Phase 3 — Relabel and join the halves
 
 - [ ] `dryRun: false`, `run: everything`, provider/model set
 - [ ] Confirm the preflight estimate before committing
 - [ ] Verify `autoSync` labels newly-added music (default on, `*/15 * * * *`)
+- [ ] **Verify the connector can actually read the tags back.** `NdSong.tags` is
+      typed `Record<string, string[]>` and is the assumption the whole split
+      rests on, but it has never been exercised against a custom tag. Check this
+      the moment the first tag is written, not after building on top of it.
+- [ ] `cohesion_radius` on `search_tracks`, using `moodDistance`
+- [ ] Re-measure the vibe radii against the real labelled library. They are
+      calibrated to ~7% of a *uniform* sample of mood-space, and real collections
+      cluster centrally.
+- [ ] **`aestheticProfile(hourBucket, weekdayType, windowDays)`** — optional.
+      Where listening history exists, project listens onto mood points and bucket
+      by hour to get a measured centroid. Where it does not, fall back to each
+      vibe's `hours` affinity. History is the user's choice to connect.
 
 **Cost:** ~$5.50 on Sonnet 5 — `batchMode: true` is already on, which is the
 50% Batch API discount. Intro pricing ends **2026-08-31**. Derived from the
@@ -117,20 +190,6 @@ measured v1 run: 876,734 output tokens for 9,193 tracks. `maxSpendUsd: 25` and
 `lifetimeCapUsd: 100` both cover it.
 
 ⚠️ `dryRun` costs full price. It protects files, not the bill.
-
-## Phase 3 — Connector reads tags
-
-- [ ] Read mood from Navidrome tags rather than the local snapshot; drop the
-      connector's own `moods` map
-- [ ] `cohesion_radius` on `search_tracks`, using `moodDistance`
-- [ ] Re-measure the vibe radii against a real labelled library. They are
-      currently calibrated to ~7% of a *uniform* sample of mood-space, and real
-      collections cluster centrally — so a central region may catch far more of
-      an actual library than of the space.
-- [ ] **`aestheticProfile(hourBucket, weekdayType, windowDays)`** — optional.
-      Where listening history exists, project listens onto mood points and bucket
-      by hour to get a measured centroid. Where it does not, fall back to each
-      vibe's `hours` affinity. History is the user's choice to connect.
 
 **Exit:** the v1 failures are the regression test — a `tender` query must stop
 returning Debussy and Metallica together, and `flowScore` on a cohesion set must

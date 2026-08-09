@@ -47,6 +47,30 @@ export type TempoFeel = (typeof TEMPO_FEELS)[number];
 export const VOCAL_KINDS = ["instrumental", "sung", "rapped", "mixed"] as const;
 export type VocalKind = (typeof VOCAL_KINDS)[number];
 
+export const TIME_SLOTS = [
+  "early morning",
+  "morning",
+  "midday",
+  "afternoon",
+  "golden hour",
+  "evening",
+  "late night",
+] as const;
+
+/**
+ * A track's full label, as read back from Navidrome's tags.
+ *
+ * This server does not produce one. Labelling belongs to the `navidrome-mood`
+ * plugin, which has the files and the LLM; everything here consumes what that
+ * wrote. See PLAN.md for why there is deliberately no second path.
+ */
+export interface Mood extends MoodPoint {
+  /** Times of day the track fits. */
+  times: string[];
+  /** Vibe regions it falls in, computed by the plugin and written as tags. */
+  vibes: string[];
+}
+
 /**
  * How much each axis contributes to "these clash".
  *

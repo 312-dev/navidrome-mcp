@@ -16,7 +16,7 @@
 
 import type { Store, Track } from "./store.js";
 import { norm, primaryArtist } from "./listenbrainz.js";
-import { UNIVERSAL_VIBES } from "./vocabulary.js";
+import { VIBE_SCHEDULE } from "./vocabulary.js";
 
 export interface TimeContext {
   iso: string;
@@ -108,15 +108,15 @@ export function vibeFits(store: Store, hour: number, spread = 1): VibeFit[] {
 
   const members = new Map<string, Track[]>();
   for (const t of store.tracks) {
-    for (const v of t.moodVibes ?? []) {
-      const arr = members.get(v.vibe);
+    for (const v of t.mood?.vibes ?? []) {
+      const arr = members.get(v);
       if (arr) arr.push(t);
-      else members.set(v.vibe, [t]);
+      else members.set(v, [t]);
     }
   }
 
   const out: VibeFit[] = [];
-  for (const [vibe, def] of Object.entries(UNIVERSAL_VIBES)) {
+  for (const [vibe, def] of Object.entries(VIBE_SCHEDULE)) {
     const tracks = members.get(vibe) ?? [];
     let inWindow = 0;
     let totalListens = 0;

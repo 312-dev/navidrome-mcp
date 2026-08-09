@@ -5,14 +5,18 @@
  * Mood- and vibe-aware playlist generation over any Navidrome library, grounded
  * in sources that each cover the others' blind spots:
  *
- *   Navidrome  - authoritative metadata + the playlist write path
- *   mood pass  - where every track sits in mood-space (see mood.ts)
+ *   Navidrome    - authoritative metadata + the playlist write path
+ *   mood tags    - written by the navidrome-mood plugin, read here (see moodtags.ts)
  *   ListenBrainz - timestamped listen history (Navidrome keeps only a last-played)
- *   Last.fm    - descriptive tag vocabulary (the library's own genres are coarse)
+ *   Last.fm      - descriptive tag vocabulary (the library's own genres are coarse)
  *
- * Only the first two are required. The listener's own playlists, their listen
- * history and Last.fm tags are optional enrichment: each improves ranking and
- * time-of-day fit where it exists, and none is load-bearing.
+ * This server produces none of them. It has no LLM client and no way to label a
+ * track: enrichment belongs to the plugin, which has the files, and the split is
+ * deliberate rather than incidental. See PLAN.md.
+ *
+ * Only Navidrome is required. Mood tags, listen history, Last.fm tags and the
+ * listener's own playlists are each optional; every feature that depends on one
+ * reports its absence rather than returning a confidently empty answer.
  *
  * Speaks MCP over stdio; the gateway wraps it with mcp-proxy to serve Streamable
  * HTTP behind the OAuth worker.
@@ -28,7 +32,8 @@ import { brief, search, type SearchParams, type SortKey } from "./query.js";
 import { Store, type Track } from "./store.js";
 import { norm } from "./listenbrainz.js";
 import { centroid, spreadRadius, TEMPO_FEELS, VOCAL_KINDS } from "./moodspace.js";
-import { MOOD_VOCABULARY, UNIVERSAL_VIBES, VIBE_NAMES } from "./vocabulary.js";
+import { MOOD_VOCABULARY, VIBE_SCHEDULE, VIBE_NAMES } from "./vocabulary.js";
+import { MOOD_TAG_NAMES } from "./moodtags.js";
 
 // ── config ──────────────────────────────────────────────────────────────────
 
@@ -72,11 +77,6 @@ const store = new Store({
   daylistName: DAYLIST_NAME,
   historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 730) || 730,
   enrich: env.NAVIDROME_ENRICH !== "0",
-  // Prefer a navidrome-specific key so this budget is separate from the shared
-  // ANTHROPIC_API_KEY that rocketmoney also uses, and either can be rotated
-  // without disturbing the other. Falls back to the shared key.
-  anthropicKey: env.NAVIDROME_ANTHROPIC_KEY || env.ANTHROPIC_API_KEY,
-  moodModel: env.MOOD_MODEL,
 });
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -160,7 +160,7 @@ server.registerTool(
         },
         tag_enrichment: store.enrichState,
         mood_coverage: coverage,
-        vibe_regions: Object.entries(UNIVERSAL_VIBES).map(([vibe, d]) => ({
+        vibe_regions: Object.entries(VIBE_SCHEDULE).map(([vibe, d]) => ({
           vibe,
           gloss: d.gloss,
           tracks: regionCounts.get(vibe) ?? 0,
@@ -169,7 +169,7 @@ server.registerTool(
         curated_playlists: playlists.length ? playlists : undefined,
         note:
           labelled === 0
-            ? "No tracks are mood-labelled yet, so the mood axes, `mood_vibes` and `fits_time` will match nothing. Run `enrich_moods` first, or fall back to genres, tags and listening history."
+            ? coverage.note + " Until then, fall back to genres, tags and listening history."
             : "Vibe regions are fixed definitions in mood-space, not this library's playlists, so `mood_vibes` means the same thing everywhere. `vibes` is different: it matches only tracks the listener filed onto a playlist by hand, which most libraries have little or none of." +
               (playlists.length ? "" : " This library has no curated playlists, so `vibes` will match nothing."),
       },
@@ -338,12 +338,12 @@ server.registerTool(
     }
     const key = region ?? playlist!;
     const tracks = region
-      ? store.tracks.filter((t) => t.moodVibes?.some((v) => v.vibe === region))
+      ? store.tracks.filter((t) => t.mood?.vibes.includes(region))
       : (store.vibes[playlist!]!.map((id) => store.byId.get(id)).filter(Boolean) as Track[]);
     if (!tracks.length) {
       return result(
         region
-          ? `No tracks fall in the "${key}" region yet. ${store.moodCoverage().labelled} of ${store.tracks.length} tracks are mood-labelled; run enrich_moods if that is zero.`
+          ? `No tracks fall in the "${key}" region. ${store.moodCoverage().note}`
           : `Playlist "${key}" is empty.`,
       );
     }
@@ -365,7 +365,7 @@ server.registerTool(
       {
         vibe: key,
         kind: region ? "vibe region" : "curated playlist",
-        gloss: region ? UNIVERSAL_VIBES[region]!.gloss : undefined,
+        gloss: region ? VIBE_SCHEDULE[region]!.gloss : undefined,
         tracks: tracks.length,
         // Where this library's take on the vibe actually sits, and how tightly
         // it holds together -- a wide spread means the region is catching things
@@ -916,36 +916,18 @@ server.registerTool(
 let lastDaylistId: string | undefined;
 
 server.registerTool(
-  "enrich_moods",
+  "mood_coverage",
   {
-    title: "Label the library's moods",
+    title: "Check mood labelling coverage",
     description:
-      "Run (or check) the one-time pass that places EVERY track in mood-space: energy, valence, intensity, acousticness, density, how fast it feels, whether it is sung, which vocabulary terms describe it, and what times of day it fits.\n\n" +
-      "This is the prerequisite for every mood filter, for vibe regions, and for cohesion — a library's own metadata cannot support them, since genres are a few dozen coarse buckets and BPM/ReplayGain/MusicBrainz IDs are present on under 3% of files. Results are cached permanently, so this normally runs once and then only picks up newly-added music.",
-    inputSchema: {
-      limit: z
-        .number()
-        .int()
-        .optional()
-        .describe("Only label this many tracks (useful for a cheap trial run). Omit for all."),
-      status_only: z.boolean().optional().describe("Just report coverage without starting a run."),
-      mode: z
-        .enum(["sync", "batch"])
-        .optional()
-        .describe(
-          "'sync' runs in parallel now (~12 min for the full library, full price). 'batch' uses the Message Batches API at 50% off but is asynchronous (usually under an hour, 24h ceiling). Defaults to sync.",
-        ),
-    },
+      "How much of the library carries a usable mood label, and what to do when the answer is none.\n\n" +
+      "This server does not label anything. Mood comes from the `navidrome-mood` plugin, which runs inside Navidrome, judges each track and writes the values into the audio files as tags. That is what makes them visible to Navidrome's own smart playlists and to every Subsonic client, not just to this server.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
   },
-  tool(async ({ limit, status_only, mode }: { limit?: number; status_only?: boolean; mode?: "sync" | "batch" }) => {
-    if (status_only) return result("Mood coverage.", store.moodCoverage());
-    const { started, mode: used } = await store.enrichMoods(limit, mode ?? "sync");
-    return result(
-      started
-        ? `Started labelling ${started} tracks (${used}). Poll with status_only.`
-        : "Nothing to label (already covered, already running, or no API key).",
-      store.moodCoverage(),
-    );
+  tool(async () => {
+    const c = store.moodCoverage();
+    return result(c.note, { ...c, tags_read: MOOD_TAG_NAMES });
   }),
 );
 

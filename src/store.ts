@@ -19,8 +19,8 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { LastFm, type Tag } from "./lastfm.js";
-import { MoodEnricher, type Mood } from "./mood.js";
-import { vibesFor, type VibeMatch } from "./vocabulary.js";
+import { moodFromTags, moodDiagnosis, MOOD_TAG_NAMES } from "./moodtags.js";
+import type { Mood } from "./moodspace.js";
 import { ListenBrainz, matchKey, norm, primaryArtist, type Listen } from "./listenbrainz.js";
 import type { NdPlaylist, NdSong, Navidrome } from "./navidrome.js";
 
@@ -71,18 +71,12 @@ export interface Track {
   /** Normalised join key. */
   nkey: string;
   /**
-   * Inferred mood, covering the WHOLE library. See mood.ts for why this is
-   * inferred rather than read from the library's own metadata.
+   * Mood, read from the tags the navidrome-mood plugin wrote into the file.
+   *
+   * Undefined means unlabelled, which is a normal state: the plugin is optional
+   * and a library without it works for everything except mood. See moodtags.ts.
    */
   mood?: Mood;
-  /**
-   * Which universal vibe regions this track falls in, derived from `mood`.
-   *
-   * Cached on the track rather than computed per query because it is a pure
-   * function of the mood label: it can only change when the label does, and
-   * `applyMoods` is the one place that happens.
-   */
-  moodVibes?: VibeMatch[];
 }
 
 export interface DaylistRun {
@@ -105,16 +99,17 @@ interface Snapshot {
   taggedTracks: string[];
   taggedArtists: string[];
   daylistRuns: DaylistRun[];
-  moods: Record<string, Mood>;
 }
 
 /**
- * Bumped to 5 for mood schema v2 (acousticness/density/tempoFeel/vocal, and no
- * model-supplied vibes). A v1 mood cannot be upgraded -- three of its axes were
- * never measured -- so an older snapshot is discarded and re-synced rather than
- * migrated, and the library is relabelled.
+ * Bumped to 6 when mood moved out of the snapshot entirely.
+ *
+ * Moods are read from Navidrome's tags on every sync now, so caching them here
+ * would mean a stale copy of something the server already holds. An older
+ * snapshot is discarded rather than migrated: it carries v1 labels on four axes
+ * that no longer describe a point in mood-space.
  */
-const SNAPSHOT_VERSION = 5;
+const SNAPSHOT_VERSION = 6;
 
 /**
  * Progress goes to stderr, never stdout: stdout is the MCP JSON-RPC channel and
@@ -148,9 +143,6 @@ export interface StoreOptions {
    */
   externalDispatcher?: unknown;
   enrich: boolean;
-  /** Anthropic key for the one-time mood pass; absent disables it. */
-  anthropicKey?: string;
-  moodModel?: string;
 }
 
 function toMs(s: unknown): number {
@@ -172,8 +164,6 @@ export class Store {
   listensSyncedAt = 0;
   private trackTags: Record<string, Tag[]> = {};
   private artistTags: Record<string, Tag[]> = {};
-  private moods: Record<string, Mood> = {};
-  private readonly mood: MoodEnricher | null;
   private taggedTracks = new Set<string>();
   private taggedArtists = new Set<string>();
 
@@ -191,9 +181,6 @@ export class Store {
     this.lastfm = new LastFm(opts.lastFmKey, opts.externalDispatcher);
     this.lb = opts.listenBrainzUser
       ? new ListenBrainz(opts.listenBrainzUser, opts.externalDispatcher)
-      : null;
-    this.mood = opts.anthropicKey
-      ? new MoodEnricher(opts.anthropicKey, opts.moodModel)
       : null;
   }
 
@@ -236,7 +223,6 @@ export class Store {
       this.artistTags = s.artistTags ?? {};
       this.taggedTracks = new Set(s.taggedTracks ?? []);
       this.taggedArtists = new Set(s.taggedArtists ?? []);
-      this.moods = s.moods ?? {};
       this.daylistRuns = s.daylistRuns ?? [];
       this.listens = (s.listenTs ?? []).map((ts, i) => {
         const key = s.listenKeys[s.listenKi[i]] ?? " ";
@@ -304,7 +290,6 @@ export class Store {
       listenKi,
       taggedTracks: [...this.taggedTracks],
       taggedArtists: [...this.taggedArtists],
-      moods: this.moods,
       daylistRuns: this.daylistRuns.slice(-200),
     };
     await mkdir(dirname(this.snapshotPath), { recursive: true });
@@ -453,12 +438,12 @@ export class Store {
         hourHist: [],
         dowHist: [],
         nkey: matchKey(primaryArtist(artist), title),
+        mood: moodFromTags(s.tags) ?? undefined,
       } satisfies Track;
     });
 
     this.byId = new Map(this.tracks.map((t) => [t.id, t]));
     this.applyTags();
-    this.applyMoods();
     this.applyListenStats();
   }
 
@@ -474,67 +459,35 @@ export class Store {
     }
   }
 
-  /** Attach mood labels and the vibe membership that falls out of them. */
-  private applyMoods(): void {
-    for (const t of this.tracks) {
-      t.mood = this.moods[t.id];
-      t.moodVibes = t.mood ? vibesFor(t.mood) : undefined;
-    }
-  }
-
-  /** How many tracks land in each vibe region. */
+  /** How many tracks land in each vibe region, per the plugin's `vibe` tag. */
   vibeHistogram(): { vibe: string; tracks: number }[] {
     const counts = new Map<string, number>();
     for (const t of this.tracks) {
-      for (const v of t.moodVibes ?? []) counts.set(v.vibe, (counts.get(v.vibe) ?? 0) + 1);
+      for (const v of t.mood?.vibes ?? []) counts.set(v, (counts.get(v) ?? 0) + 1);
     }
     return [...counts.entries()]
       .map(([vibe, tracks]) => ({ vibe, tracks }))
       .sort((a, b) => b.tracks - a.tracks);
   }
 
-  /** How much of the library has a mood label yet. */
-  moodCoverage(): { labelled: number; total: number; progress: unknown } {
-    return {
-      labelled: this.tracks.filter((t) => t.mood).length,
-      total: this.tracks.length,
-      progress: this.mood?.progress ?? { running: false, note: "no ANTHROPIC_API_KEY" },
-    };
-  }
-
   /**
-   * Label every unlabelled track. One-time in practice: results persist to the
-   * snapshot, so later runs only pick up newly-added music.
+   * How much of the library carries a usable mood label.
+   *
+   * Reports *why* when the answer is none. "0 labelled" reads identically
+   * whether the plugin was never installed, ran but wrote nothing, or wrote tags
+   * Navidrome then dropped for want of a mappings.yaml entry -- and those need
+   * three different fixes.
    */
-  async enrichMoods(limit?: number, mode?: "sync" | "batch"): Promise<{ started: number; mode: string }> {
-    if (!this.mood) return { started: 0, mode: "none" };
-    if (this.mood.progress.running) return { started: 0, mode: "already-running" };
-    let pending = this.tracks.filter((t) => !t.mood && !t.missing);
-    if (limit && limit > 0) pending = pending.slice(0, limit);
-    if (!pending.length) return { started: 0, mode: "nothing-pending" };
-    // Batch for anything large enough that the 50% discount outweighs waiting on
-    // a queue; stay synchronous for small trial runs where it does not.
-    const useBatch = mode === "batch" || (mode !== "sync" && pending.length > 200);
-    log(`mood: labelling ${pending.length} tracks (${useBatch ? "batch API" : "sync"})`);
-
-    const onRows = async (rows: (Mood & { id: string })[]) => {
-      for (const r of rows) {
-        if (!this.byId.has(r.id)) continue;
-        const { id, ...m } = r;
-        this.moods[id] = m;
-      }
-      this.applyMoods();
-      await this.saveSnapshotSoon();
+  moodCoverage(): { labelled: number; total: number; note: string } {
+    const labelled = this.tracks.filter((t) => t.mood).length;
+    const anyMoodTag = this.rawSongs.some((s) =>
+      MOOD_TAG_NAMES.some((n) => (s.tags?.[n]?.length ?? 0) > 0),
+    );
+    return {
+      labelled,
+      total: this.tracks.length,
+      note: moodDiagnosis(this.tracks.length, labelled, anyMoodTag),
     };
-
-    void (useBatch
-      ? this.mood.runBatched(pending, onRows)
-      : this.mood.run(this, pending, onRows)
-    )
-      .then(() => log(`mood: finished, ${this.tracks.filter((t) => t.mood).length} labelled`))
-      .catch((e) => log(`mood: failed: ${String(e)}`));
-
-    return { started: pending.length, mode: useBatch ? "batch" : "sync" };
   }
 
   /**

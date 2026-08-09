@@ -32,14 +32,27 @@ Only the first is required. Listen history, Last.fm tags and your own playlists 
 ranking and time-of-day fit where they exist, and none of them is load-bearing — the same
 query means the same thing in a library that has none of them.
 
-## The mood pass
+## Where mood comes from
 
-A library's own metadata cannot answer a mood question: genres are a few dozen coarse
-buckets, and BPM, ReplayGain and MusicBrainz IDs are present on under 3% of files. So a
-one-time enrichment pass places every track in mood-space — **energy, valence, intensity,
-acousticness, density, how fast it feels, whether it is sung, two to four vocabulary terms,
-and the times of day it fits**. Results are cached permanently, so this runs once and
-afterwards only picks up new music.
+**Not from here.** This server has no LLM client and no way to label a track. Mood is
+produced by [`navidrome-mood`](https://github.com/312-dev/navidrome-mood), a Navidrome
+plugin that judges each track and writes the values into the audio files as tags. This
+server reads those tags and does everything downstream: filtering, cohesion, sequencing,
+playlist writing.
+
+The split is deliberate and one-directional. The plugin never calls this server and is
+useful without it — its tags drive Navidrome's own smart playlists, and Music Assistant
+and every Subsonic client can read them too. This server depends on the plugin only for
+mood; install it if you want mood-aware playlists, skip it and everything else still
+works.
+
+Keeping a second labelling path here as a fallback would mean maintaining the same
+vocabulary in two languages and shipping two answers to one question. There is deliberately
+no fallback.
+
+What the plugin writes, per track: **energy, valence, intensity, acousticness, density, how
+fast it feels, whether it is sung, two to four vocabulary terms, the times of day it fits,
+and the vibe regions it falls in**.
 
 The vocabulary is **defined, not derived**. Each of its 52 terms carries an explicit anchor
 in mood-space, and each of the 14 vibes is a named region with a centre and a radius, so the
@@ -51,12 +64,10 @@ Words alone cannot carry cohesion, which is why the axes exist. Measured on a re
 `tender` covered both Debussy's *Suite bergamasque* and Metallica's *Nothing Else Matters* —
 both labels correct, and useless as a playlist filter. Distance in mood-space separates them.
 
-Cost stays small through three things: batching ~40 tracks per request, **prompt-caching the
-large identical taxonomy prefix** (the first batch runs alone, so the rest hit a warm cache
-instead of all missing it concurrently), and running with thinking disabled — this is
-classification, not reasoning. Set `ANTHROPIC_API_KEY` to enable it and `MOOD_MODEL` to
-trade quality for spend; without a key everything else still works and only the mood
-filters go dark.
+Call `mood_coverage` to see how much of a library is labelled. When the answer is none it
+says which of the three causes applies — plugin never run, plugin ran but wrote nothing, or
+tags written but not registered in Navidrome's `mappings.yaml` — because those need
+different fixes and all three otherwise read as an empty library.
 
 ## Design notes
 
@@ -69,15 +80,17 @@ filters go dark.
 - **Navidrome's own compound engine is still exposed** via `create_smart_playlist`, for
   standing playlists that should keep re-evaluating server-side. Note those rules can
   only see Navidrome's own fields — not ListenBrainz listens or Last.fm tags.
-- **`npm run check:vocab`** asserts what typechecking cannot: that every region is
-  reachable, every synonym resolves, no region swallows more than 15% of mood-space, and
-  the Debussy/Metallica pair still land in different vibes.
+- **`npm run check:vocab`** asserts what typechecking cannot about this side's copy of the
+  vocabulary: every synonym resolves and is reachable, no term or region name contains a
+  character Navidrome splits tag values on, and every hour of the day is claimed by some
+  region. The anchors and region geometry live in the plugin and are asserted there.
 
 ## Tools
 
 | Tool | Purpose |
 |---|---|
 | `describe_library` | Orientation: size, genres, decades, vibe regions, tag vocabulary |
+| `mood_coverage` | How much of the library is labelled, and what to fix when none of it is |
 | `search_tracks` | The workhorse — full compound filtering, diversity caps, affinity ranking |
 | `get_vibe_profile` | What a vibe actually consists of in *this* library, and how tightly it clusters |
 | `similar_tracks` | Expand from seeds via agents + playlist co-occurrence |
