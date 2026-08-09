@@ -116,28 +116,28 @@ enforce a requirement on one — so affect-named regions now carry a valence bou
 alongside the existing tempo/vocal ones. Both are recorded in `DESIGN-mood-v2.md`
 and asserted by `check:vocab`.
 
-## Phase 1 — Connector stops enriching
+## Phase 1 — Connector stops enriching ✅ done 2026-08-09 (`d458b8c`)
 
-Makes the architecture true in the code rather than only in this file. No
-dependency on the plugin being finished: v1 labels were already discarded at
-snapshot v5, so there is nothing to regress.
+- [x] **`src/mood.ts` deleted** (519 lines) — `MoodEnricher`, the Anthropic
+      client, batching, the Batch API path, cost tracking, prompt and schema
+- [x] `@anthropic-ai/sdk` dropped from `package.json` and the lockfile;
+      `NAVIDROME_ANTHROPIC_KEY` / `ANTHROPIC_API_KEY` removed from the code and
+      from `mcp-gateway/gateway/supervisord.conf` (**that edit is uncommitted in
+      the gateway repo**)
+- [x] Anchors and region geometry moved out. `src/vocabulary.ts` is now a
+      consumer's subset: term list, synonyms, and a region→`hours` table
+- [x] `src/moodtags.ts` — new, reads `Mood` out of `NdSong.tags`. All-or-nothing
+      on the five axes plus tempo and vocal
+- [x] Snapshot version 5 → 6; the `moods` map is gone from the snapshot entirely
+- [x] `enrich_moods` → `mood_coverage`, which reports *why* a library has no
+      moods (never installed / ran but wrote nothing / missing from
+      `mappings.yaml`) rather than only that it has none
+- [x] `check:vocab` rewritten for what this side still owns. It caught that hours
+      4 and 5 belonged to no region, so a fresh install had nothing to suggest at
+      4am; `late night` and `slow morning` were extended to cover them.
 
-- [ ] **Delete `src/mood.ts`** — `MoodEnricher`, the Anthropic client, batching,
-      the Batch API path, cost tracking, the labelling prompt and its schema
-- [ ] Delete the `enrich_moods` tool and `Store.enrichMoods`
-- [ ] Drop the `@anthropic-ai/sdk` dependency, `NAVIDROME_ANTHROPIC_KEY` and
-      `ANTHROPIC_API_KEY`, and remove them from the gateway's supervisord entry
-- [ ] Move `MOOD_ANCHORS` and the region geometry (centres, radii, valence/tempo/
-      vocal bounds) **out** — that is the plugin's to own. Keep `moodspace.ts`,
-      the region-to-`hours` table, and a generated term/synonym list for folding
-      query input
-- [ ] Read `Mood` from `NdSong.tags` instead of the snapshot's `moods` map, and
-      drop that map from the snapshot
-- [ ] Where no mood tags are present, every mood tool says so and names the
-      plugin. Silence would look like an empty library.
-
-**Exit:** `grep -ri anthropic src/` is empty, and the connector has no path to
-produce a label.
+**Exit met:** `grep -ri anthropic src/` is empty and there is no code path here
+that can produce a label.
 
 ## The tag contract
 
