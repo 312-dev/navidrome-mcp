@@ -1,20 +1,22 @@
 /**
- * Daylist context.
+ * Time-of-day context.
  *
- * The generator's job is to pick a mood and 25-ish tracks for *this hour*. Rather
- * than have the model guess what "6pm on a Thursday" means, this module measures
- * it against the actual listen history: which of his own curated moods he really
- * reaches for at this time, which artists dominate the hour, and what he has
- * already heard recently (so the rotation moves).
+ * A playlist for *right now* needs to know what "6pm on a Thursday" means, and
+ * there are two ways to answer that. Where listening history exists this module
+ * measures it: which mood regions actually get played at this hour, which
+ * artists dominate it, and what has been heard recently so the rotation moves.
+ * Where it does not, each vibe's own `hours` affinity stands in, so an install
+ * with no scrobbling connected still gets a sensible answer on day one.
  *
- * The observed-vs-baseline lift is the key number. Comparing an hour's raw counts
- * across vibes would just rank them by size -- "bedtime" has 718 tracks and would
- * win every hour. Lift asks instead: does this vibe show up *more than its usual
- * share* at this hour? That is what makes 7am and 11pm come out different.
+ * The observed-vs-baseline lift is the key number in the measured case. Ranking
+ * vibes by an hour's raw counts would just rank them by size -- the largest
+ * region wins every hour. Lift asks instead: does this vibe show up *more than
+ * its usual share* at this hour? That is what makes 7am and 11pm differ.
  */
 
 import type { Store, Track } from "./store.js";
 import { norm, primaryArtist } from "./listenbrainz.js";
+import { UNIVERSAL_VIBES } from "./vocabulary.js";
 
 export interface TimeContext {
   iso: string;
@@ -78,55 +80,78 @@ function hourWindow(hour: number, spread = 1): number[] {
 
 export interface VibeFit {
   vibe: string;
+  gloss: string;
+  /** Library tracks whose mood label falls inside this region. */
   tracks: number;
-  /** Tracks the mood pass says read as this vibe but that are NOT on the playlist. */
-  extended_tracks: number;
   listens_in_window: number;
-  /** >1 means this vibe is over-represented at this hour versus its own average. */
-  lift: number;
+  /**
+   * >1 means this vibe is over-represented at this hour versus its own average.
+   * Null when the region's tracks have no listen history to measure.
+   */
+  lift: number | null;
+  /** The region's own declared time affinity -- the fallback when lift is null. */
+  suits_hour: boolean;
   top_artists: string[];
 }
 
+/**
+ * How well each vibe region fits a given hour.
+ *
+ * Always returns every region, including empty ones. A row reading zero tracks
+ * is informative rather than noise: it says the vocabulary is available but the
+ * library is not labelled yet, which is a different problem from a region this
+ * particular collection happens not to reach.
+ */
 export function vibeFits(store: Store, hour: number, spread = 1): VibeFit[] {
   const window = new Set(hourWindow(hour, spread));
   const windowShare = window.size / 24;
-  const out: VibeFit[] = [];
 
-  // How many tracks the mood pass places in each vibe, beyond the playlist
-  // itself. This is the reach a daylist actually has once mood labels exist.
-  const extended = new Map<string, number>();
+  const members = new Map<string, Track[]>();
   for (const t of store.tracks) {
-    for (const v of t.mood?.vibes ?? []) {
-      if (!t.vibes.includes(v)) extended.set(v, (extended.get(v) ?? 0) + 1);
+    for (const v of t.moodVibes ?? []) {
+      const arr = members.get(v.vibe);
+      if (arr) arr.push(t);
+      else members.set(v.vibe, [t]);
     }
   }
 
-  for (const [vibe, ids] of Object.entries(store.vibes)) {
+  const out: VibeFit[] = [];
+  for (const [vibe, def] of Object.entries(UNIVERSAL_VIBES)) {
+    const tracks = members.get(vibe) ?? [];
     let inWindow = 0;
     let totalListens = 0;
     const artistCounts = new Map<string, number>();
-    for (const id of ids) {
-      const t = store.byId.get(id);
-      if (!t || !t.listens) continue;
+    for (const t of tracks) {
+      if (!t.listens) continue;
       totalListens += t.listens;
       for (const h of window) inWindow += t.hourHist[h] ?? 0;
       artistCounts.set(t.artist, (artistCounts.get(t.artist) ?? 0) + t.listens);
     }
-    if (!totalListens) continue;
-    const observed = inWindow / totalListens;
     out.push({
       vibe,
-      tracks: ids.length,
-      extended_tracks: extended.get(vibe) ?? 0,
+      gloss: def.gloss,
+      tracks: tracks.length,
       listens_in_window: inWindow,
-      lift: Number((observed / windowShare).toFixed(2)),
+      lift: totalListens ? Number(((inWindow / totalListens) / windowShare).toFixed(2)) : null,
+      suits_hour: def.hours.includes(hour),
       top_artists: [...artistCounts.entries()]
         .sort((a, b) => b[1] - a[1])
         .slice(0, 5)
         .map(([a]) => a),
     });
   }
-  return out.sort((a, b) => b.lift - a.lift);
+
+  // Measured lift ranks first where it exists; unmeasured regions fall back to
+  // their declared hours, and empty ones sink. Sorting a null lift as 0 would
+  // rank "no evidence" below "evidence it is wrong for this hour", which is the
+  // wrong way round for a library that has simply never been scrobbled.
+  return out.sort((a, b) => {
+    if (a.lift !== null && b.lift !== null) return b.lift - a.lift;
+    if (a.lift !== null) return -1;
+    if (b.lift !== null) return 1;
+    if (a.suits_hour !== b.suits_hour) return a.suits_hour ? -1 : 1;
+    return b.tracks - a.tracks;
+  });
 }
 
 /** What actually gets played at this hour, regardless of vibe labelling. */

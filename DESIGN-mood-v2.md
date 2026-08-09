@@ -75,7 +75,7 @@ comfortably next to each other:
 |---|---|---|
 | `energy` | 0–100 | still → frantic activity |
 | `intensity` | 0–100 | gentle → heavy/aggressive |
-| `acousticness` | 0–100 | fully electronic → fully acoustic *(v1's `organic`, renamed)* |
+| `acousticness` | 0–100 | fully electronic → fully acoustic *(was `organic` in v1)* |
 | `density` | 0–100 | sparse/solo → wall-of-sound **(new)** |
 | `tempo_feel` | enum | `still` \| `slow` \| `mid` \| `driving` \| `frantic` **(new)** |
 | `vocal` | enum | `instrumental` \| `sung` \| `rapped` \| `mixed` **(new)** |
@@ -88,8 +88,10 @@ valence and still flow:
 **Semantic** — for describing and searching, never for cohesion alone:
 
 | `moods` | 2–4 terms from a **controlled vocabulary** |
-| `vibes` | which curated playlists it reads as |
 | `times` | times of day it fits |
+
+Vibe membership is deliberately *not* a field. It is computed from the axes, so it costs no
+tokens, cannot drift between batches, and updates for free when a region is redefined.
 
 ### Why the three new fields
 
@@ -123,6 +125,39 @@ each mismatch actually is:
 
 Valence being cheap is the non-obvious one, and it's what keeps playlists from
 becoming emotionally monotonous while staying sonically coherent.
+
+## Vibes as regions
+
+A vibe is a centre, a radius, and optional hard constraints. Membership is
+`numericDistance(track, centre) <= radius` once the constraints pass — a measurement, not a
+prediction, so it works in a library with no playlists and carries no accuracy caveat.
+
+The radii are calibrated so each region covers about 7% of mood-space. Measured against a
+uniform sample, that puts a typical point in ~1 region and leaves ~62% of the space in none,
+which is correct: regions are shortcuts, not a partition, and anything outside them is still
+reachable by axis ranges and vocabulary terms. The first radii were guessed by eye and one
+of them turned out to cover **46%** of the space, which is not a filter.
+
+**Constraints exist because a mean cannot enforce a requirement.** Euclidean distance over
+five axes lets four agreeing axes wash out a 40-point gap on the fifth, so `warm` (valence
+66) sat inside `melancholy` (valence 24) at every radius that still admitted genuinely sad
+music. No radius fixes that. The regions whose *name* makes an affect claim therefore carry
+a valence bound, exactly as `focus` carries an instrumental one:
+
+| Region | Bound |
+|---|---|
+| `melancholy` | valence 0–45 |
+| `heavy` | valence 0–55 |
+| `golden hour` | valence 45–100 |
+| `hype` | valence 50–100 |
+| `uplift`, `party` | valence 55–100 |
+
+Regions like `focus`, `background` and `driving` get none — they are functional, not
+affective, and constraining their valence would be wrong.
+
+Note the calibration is against a *uniform* sample of mood-space. Real libraries cluster
+centrally, so a central region will catch a larger share of an actual collection than of the
+space. Re-measure against a labelled library once one exists.
 
 ## Sequencing
 

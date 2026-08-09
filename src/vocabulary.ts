@@ -28,15 +28,10 @@
  * are slow, dark and heavy-hearted.
  */
 
-import type { TempoFeel, VocalKind } from "./moodspace.js";
+import { numericDistance, type MoodAxes, type MoodPoint, type TempoFeel, type VocalKind } from "./moodspace.js";
 
-/** Where a term sits. Axes match MoodPoint; all 0-100. */
-export interface TermAnchor {
-  energy: number;
-  valence: number;
-  intensity: number;
-  acousticness: number;
-  density: number;
+/** Where a term sits, plus the prose that says the same thing in words. */
+export interface TermAnchor extends MoodAxes {
   /** Prose the labeller sees, so the anchor is not the only guidance. */
   gloss: string;
 }
@@ -210,8 +205,25 @@ export function canonicaliseAll(raw: string[], max = 4): MoodTerm[] {
  * history; where history exists, measured lift should override it.
  */
 export interface VibeDefinition {
-  centre: Omit<TermAnchor, "gloss">;
+  centre: MoodAxes;
+  /**
+   * Membership boundary, in the same units `numericDistance` returns.
+   *
+   * Calibrated so each region covers ~7% of mood-space, which puts a typical
+   * point in about one region and leaves ~62% of the space in none. Regions are
+   * shortcuts, not a partition: a track in no region is still reachable by axis
+   * ranges and vocabulary terms.
+   */
   radius: number;
+  /**
+   * Hard constraints. A track outside one is excluded however close it sits,
+   * because a mean distance over five axes cannot enforce a requirement on one
+   * of them -- four agreeing axes wash out a 40-point gap on the fifth. That is
+   * fine for "is this nearby" and wrong for "is this sad", so the regions whose
+   * NAME makes an affect claim carry a valence bound, exactly as `focus` carries
+   * an instrumental one.
+   */
+  valence?: [number, number];
   tempo?: TempoFeel[];
   vocal?: VocalKind[];
   hours: number[];
@@ -219,18 +231,51 @@ export interface VibeDefinition {
 }
 
 export const UNIVERSAL_VIBES: Record<string, VibeDefinition> = {
-  "wind down":   { centre: { energy: 20, valence: 52, intensity: 14, acousticness: 78, density: 24 }, radius: 26, tempo: ["still", "slow"], hours: [21, 22, 23, 0, 1], gloss: "settling toward sleep" },
-  "slow morning":{ centre: { energy: 32, valence: 62, intensity: 22, acousticness: 70, density: 34 }, radius: 26, tempo: ["slow", "mid"], hours: [6, 7, 8, 9], gloss: "easing into the day" },
-  "focus":       { centre: { energy: 42, valence: 50, intensity: 28, acousticness: 40, density: 40 }, radius: 24, vocal: ["instrumental"], hours: [9, 10, 11, 14, 15, 16], gloss: "steady, undemanding, stays out of the way" },
-  "background":  { centre: { energy: 38, valence: 58, intensity: 25, acousticness: 55, density: 38 }, radius: 28, hours: [11, 12, 13, 14], gloss: "pleasant and unobtrusive" },
-  "uplift":      { centre: { energy: 68, valence: 80, intensity: 42, acousticness: 45, density: 58 }, radius: 28, hours: [8, 9, 10, 16, 17], gloss: "a deliberate lift in mood" },
-  "workout":     { centre: { energy: 84, valence: 62, intensity: 70, acousticness: 25, density: 72 }, radius: 30, tempo: ["driving", "frantic"], hours: [6, 7, 17, 18, 19], gloss: "sustained physical push" },
-  "hype":        { centre: { energy: 86, valence: 70, intensity: 66, acousticness: 18, density: 74 }, radius: 28, hours: [20, 21, 22], gloss: "getting up for something" },
-  "driving":     { centre: { energy: 70, valence: 60, intensity: 58, acousticness: 40, density: 62 }, radius: 30, tempo: ["mid", "driving"], hours: [8, 9, 16, 17, 18], gloss: "motion; miles passing" },
-  "golden hour": { centre: { energy: 48, valence: 68, intensity: 32, acousticness: 55, density: 46 }, radius: 26, hours: [17, 18, 19], gloss: "warm light, day easing off" },
-  "late night":  { centre: { energy: 40, valence: 40, intensity: 38, acousticness: 35, density: 45 }, radius: 28, hours: [23, 0, 1, 2, 3], gloss: "after hours; low light" },
-  "melancholy":  { centre: { energy: 28, valence: 24, intensity: 24, acousticness: 65, density: 32 }, radius: 26, hours: [21, 22, 23], gloss: "sitting with something sad" },
-  "heavy":       { centre: { energy: 80, valence: 32, intensity: 84, acousticness: 28, density: 78 }, radius: 30, hours: [15, 16, 17, 21, 22], gloss: "loud, dark and physical" },
-  "dinner":      { centre: { energy: 40, valence: 66, intensity: 26, acousticness: 68, density: 40 }, radius: 26, hours: [18, 19, 20], gloss: "convivial but not competing with conversation" },
-  "party":       { centre: { energy: 80, valence: 82, intensity: 50, acousticness: 20, density: 72 }, radius: 30, hours: [20, 21, 22, 23], gloss: "a room full of people" },
+  "wind down":   { centre: { energy: 20, valence: 52, intensity: 14, acousticness: 78, density: 24 }, radius: 21, tempo: ["still", "slow"], hours: [21, 22, 23, 0, 1], gloss: "settling toward sleep" },
+  "slow morning":{ centre: { energy: 32, valence: 62, intensity: 22, acousticness: 70, density: 34 }, radius: 19, tempo: ["slow", "mid"], hours: [6, 7, 8, 9], gloss: "easing into the day" },
+  "focus":       { centre: { energy: 42, valence: 50, intensity: 28, acousticness: 40, density: 40 }, radius: 18, vocal: ["instrumental"], hours: [9, 10, 11, 14, 15, 16], gloss: "steady, undemanding, stays out of the way" },
+  "background":  { centre: { energy: 38, valence: 58, intensity: 25, acousticness: 55, density: 38 }, radius: 18, hours: [11, 12, 13, 14], gloss: "pleasant and unobtrusive" },
+  "uplift":      { centre: { energy: 68, valence: 80, intensity: 42, acousticness: 45, density: 58 }, radius: 21, valence: [55, 100], hours: [8, 9, 10, 16, 17], gloss: "a deliberate lift in mood" },
+  "workout":     { centre: { energy: 84, valence: 62, intensity: 70, acousticness: 25, density: 72 }, radius: 20, tempo: ["driving", "frantic"], hours: [6, 7, 17, 18, 19], gloss: "sustained physical push" },
+  "hype":        { centre: { energy: 86, valence: 70, intensity: 66, acousticness: 18, density: 74 }, radius: 24, valence: [50, 100], hours: [20, 21, 22], gloss: "getting up for something" },
+  "driving":     { centre: { energy: 70, valence: 60, intensity: 58, acousticness: 40, density: 62 }, radius: 18, tempo: ["mid", "driving"], hours: [8, 9, 16, 17, 18], gloss: "motion; miles passing" },
+  "golden hour": { centre: { energy: 48, valence: 68, intensity: 32, acousticness: 55, density: 46 }, radius: 20, valence: [45, 100], hours: [17, 18, 19], gloss: "warm light, day easing off" },
+  "late night":  { centre: { energy: 40, valence: 40, intensity: 38, acousticness: 35, density: 45 }, radius: 18, hours: [23, 0, 1, 2, 3], gloss: "after hours; low light" },
+  "melancholy":  { centre: { energy: 28, valence: 24, intensity: 24, acousticness: 65, density: 32 }, radius: 22, valence: [0, 45], hours: [21, 22, 23], gloss: "sitting with something sad" },
+  "heavy":       { centre: { energy: 80, valence: 32, intensity: 84, acousticness: 28, density: 78 }, radius: 24, valence: [0, 55], hours: [15, 16, 17, 21, 22], gloss: "loud, dark and physical" },
+  "dinner":      { centre: { energy: 40, valence: 66, intensity: 26, acousticness: 68, density: 40 }, radius: 19, hours: [18, 19, 20], gloss: "convivial but not competing with conversation" },
+  "party":       { centre: { energy: 80, valence: 82, intensity: 50, acousticness: 20, density: 72 }, radius: 23, valence: [55, 100], hours: [20, 21, 22, 23], gloss: "a room full of people" },
 };
+
+export const VIBE_NAMES = Object.keys(UNIVERSAL_VIBES);
+
+export interface VibeMatch {
+  vibe: string;
+  /** Distance from the region's centre; lower is a more central example. */
+  distance: number;
+}
+
+/**
+ * Which vibes a track belongs to.
+ *
+ * Membership is a measurement against a defined region, not a prediction about
+ * it: there is no training set, no holdout, and no accuracy figure to attach to
+ * a result. It works identically in a library with no playlists and no listening
+ * history, because neither is consulted.
+ *
+ * Tracks legitimately land in several regions -- "golden hour" and "dinner"
+ * overlap by construction -- so the result is a ranked list, not a winner, and
+ * an empty list is a normal answer rather than a failure.
+ */
+export function vibesFor(p: MoodPoint, max = 3): VibeMatch[] {
+  const out: VibeMatch[] = [];
+  for (const [vibe, def] of Object.entries(UNIVERSAL_VIBES)) {
+    if (def.valence && (p.valence < def.valence[0] || p.valence > def.valence[1])) continue;
+    if (def.tempo && !def.tempo.includes(p.tempoFeel)) continue;
+    if (def.vocal && !def.vocal.includes(p.vocal)) continue;
+    const distance = numericDistance(p, def.centre);
+    if (distance > def.radius) continue;
+    out.push({ vibe, distance: Number(distance.toFixed(1)) });
+  }
+  return out.sort((a, b) => a.distance - b.distance).slice(0, max);
+}

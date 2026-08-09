@@ -16,7 +16,8 @@
     "build": "tsup",
     "dev": "npx tsx src/index.ts",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:vocab": "tsx scripts/check-vocabulary.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",

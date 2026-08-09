@@ -93,6 +93,332 @@ function primaryArtist(s) {
   );
 }
 
+// src/moodspace.ts
+var TEMPO_FEELS = ["still", "slow", "mid", "driving", "frantic"];
+var VOCAL_KINDS = ["instrumental", "sung", "rapped", "mixed"];
+var W = {
+  intensity: 1.6,
+  acousticness: 1.4,
+  density: 1,
+  energy: 1,
+  valence: 0.45
+};
+var TEMPO_INDEX = {
+  still: 0,
+  slow: 1,
+  mid: 2,
+  driving: 3,
+  frantic: 4
+};
+var TEMPO_STEP_COST = 18;
+function vocalCost(a, b) {
+  if (a === b) return 0;
+  const pair = [a, b].sort().join("|");
+  switch (pair) {
+    case "mixed|sung":
+      return 4;
+    case "mixed|rapped":
+      return 8;
+    case "rapped|sung":
+      return 20;
+    case "instrumental|sung":
+      return 16;
+    case "instrumental|mixed":
+      return 18;
+    case "instrumental|rapped":
+      return 28;
+    default:
+      return 12;
+  }
+}
+function numericDistance(a, b) {
+  const sq = W.intensity * (a.intensity - b.intensity) ** 2 + W.acousticness * (a.acousticness - b.acousticness) ** 2 + W.density * (a.density - b.density) ** 2 + W.energy * (a.energy - b.energy) ** 2 + W.valence * (a.valence - b.valence) ** 2;
+  const totalW = W.intensity + W.acousticness + W.density + W.energy + W.valence;
+  return Math.sqrt(sq / totalW);
+}
+function moodDistance(a, b) {
+  const tempo = Math.abs(TEMPO_INDEX[a.tempoFeel] - TEMPO_INDEX[b.tempoFeel]) * TEMPO_STEP_COST;
+  return numericDistance(a, b) + tempo + vocalCost(a.vocal, b.vocal);
+}
+function centroid(points) {
+  if (!points.length) return null;
+  const mean = (f) => points.reduce((s, p) => s + f(p), 0) / points.length;
+  const tempos = points.map((p) => TEMPO_INDEX[p.tempoFeel]).sort((x, y) => x - y);
+  const tIdx = tempos[Math.floor(tempos.length / 2)];
+  const vocalCounts = /* @__PURE__ */ new Map();
+  for (const p of points) vocalCounts.set(p.vocal, (vocalCounts.get(p.vocal) ?? 0) + 1);
+  const vocal = [...vocalCounts.entries()].sort((x, y) => y[1] - x[1])[0][0];
+  const moodCounts = /* @__PURE__ */ new Map();
+  for (const p of points) for (const m of p.moods) moodCounts.set(m, (moodCounts.get(m) ?? 0) + 1);
+  return {
+    energy: mean((p) => p.energy),
+    valence: mean((p) => p.valence),
+    intensity: mean((p) => p.intensity),
+    acousticness: mean((p) => p.acousticness),
+    density: mean((p) => p.density),
+    tempoFeel: TEMPO_FEELS[tIdx],
+    vocal,
+    moods: [...moodCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([m]) => m)
+  };
+}
+function spreadRadius(points, quantile = 0.75) {
+  const c = centroid(points);
+  if (!c || points.length < 2) return 0;
+  const ds = points.map((p) => moodDistance(p, c)).sort((a, b) => a - b);
+  return ds[Math.min(ds.length - 1, Math.floor(ds.length * quantile))];
+}
+
+// src/vocabulary.ts
+var MOOD_ANCHORS = {
+  // ── low arousal, positive valence: calm, warm, at ease ──────────────────
+  serene: { energy: 12, valence: 62, intensity: 10, acousticness: 85, density: 20, gloss: "still and untroubled; space around every sound" },
+  tender: { energy: 20, valence: 58, intensity: 14, acousticness: 78, density: 25, gloss: "soft and close, handled carefully" },
+  gentle: { energy: 22, valence: 56, intensity: 15, acousticness: 76, density: 26, gloss: "unhurried and mild, nothing forced" },
+  warm: { energy: 32, valence: 66, intensity: 25, acousticness: 68, density: 40, gloss: "rounded and comfortable; low-end without weight" },
+  mellow: { energy: 30, valence: 60, intensity: 20, acousticness: 62, density: 35, gloss: "relaxed and smooth-edged" },
+  pastoral: { energy: 20, valence: 58, intensity: 15, acousticness: 90, density: 22, gloss: "open, rural, acoustic; air and daylight" },
+  intimate: { energy: 22, valence: 50, intensity: 15, acousticness: 80, density: 20, gloss: "small-room close; you hear the performer breathe" },
+  hushed: { energy: 16, valence: 48, intensity: 12, acousticness: 78, density: 18, gloss: "deliberately quiet, held back" },
+  dreamy: { energy: 28, valence: 58, intensity: 20, acousticness: 45, density: 50, gloss: "blurred and reverberant, edges softened" },
+  // ── low arousal, negative valence: sad, heavy-hearted, still ────────────
+  melancholy: { energy: 26, valence: 26, intensity: 22, acousticness: 62, density: 35, gloss: "settled sadness, not acute" },
+  mournful: { energy: 20, valence: 18, intensity: 20, acousticness: 70, density: 30, gloss: "grieving; weight without volume" },
+  lonesome: { energy: 24, valence: 28, intensity: 18, acousticness: 82, density: 20, gloss: "solitary and spare, often a single voice" },
+  bleak: { energy: 20, valence: 12, intensity: 28, acousticness: 45, density: 32, gloss: "cold and without consolation" },
+  weary: { energy: 22, valence: 32, intensity: 20, acousticness: 58, density: 32, gloss: "worn down, dragging slightly" },
+  wistful: { energy: 30, valence: 40, intensity: 22, acousticness: 65, density: 35, gloss: "longing, gently unresolved" },
+  // ── mid arousal, positive valence: bright, moving, good-natured ─────────
+  sunny: { energy: 48, valence: 80, intensity: 30, acousticness: 58, density: 45, gloss: "bright and uncomplicated" },
+  sweet: { energy: 36, valence: 76, intensity: 20, acousticness: 70, density: 35, gloss: "affectionate and light" },
+  playful: { energy: 52, valence: 78, intensity: 30, acousticness: 55, density: 45, gloss: "bouncing, unserious" },
+  breezy: { energy: 44, valence: 72, intensity: 28, acousticness: 58, density: 40, gloss: "easy forward motion, no effort showing" },
+  groovy: { energy: 55, valence: 68, intensity: 35, acousticness: 45, density: 52, gloss: "pocket-led; the rhythm section is the point" },
+  funky: { energy: 60, valence: 70, intensity: 42, acousticness: 45, density: 58, gloss: "syncopated and physical" },
+  swinging: { energy: 50, valence: 74, intensity: 32, acousticness: 78, density: 48, gloss: "lilting triplet feel, live-band warmth" },
+  jaunty: { energy: 48, valence: 74, intensity: 30, acousticness: 72, density: 42, gloss: "chipper and stepping along" },
+  // ── mid arousal, negative valence: unsettled, dark but not violent ──────
+  moody: { energy: 40, valence: 34, intensity: 40, acousticness: 40, density: 45, gloss: "overcast; withholding" },
+  brooding: { energy: 38, valence: 26, intensity: 45, acousticness: 40, density: 45, gloss: "gathering, something held down" },
+  tense: { energy: 52, valence: 30, intensity: 55, acousticness: 35, density: 50, gloss: "wound tight, unresolved" },
+  restless: { energy: 58, valence: 40, intensity: 50, acousticness: 42, density: 50, gloss: "agitated, unable to settle" },
+  smouldering: { energy: 45, valence: 40, intensity: 45, acousticness: 55, density: 45, gloss: "slow-burning heat, held in reserve" },
+  defiant: { energy: 62, valence: 45, intensity: 60, acousticness: 40, density: 60, gloss: "planted and pushing back" },
+  // ── high arousal, positive valence: lift, celebration, drive ────────────
+  euphoric: { energy: 84, valence: 86, intensity: 50, acousticness: 18, density: 72, gloss: "peak lift; hands in the air" },
+  exuberant: { energy: 80, valence: 82, intensity: 45, acousticness: 50, density: 65, gloss: "overflowing, unrestrained delight" },
+  triumphant: { energy: 78, valence: 78, intensity: 62, acousticness: 45, density: 78, gloss: "victorious, full-width" },
+  anthemic: { energy: 72, valence: 66, intensity: 58, acousticness: 42, density: 76, gloss: "built to be sung back by a crowd" },
+  driving: { energy: 76, valence: 56, intensity: 60, acousticness: 35, density: 66, gloss: "relentless forward propulsion" },
+  danceable: { energy: 68, valence: 72, intensity: 42, acousticness: 25, density: 60, gloss: "made to move to; steady and physical" },
+  // ── high arousal, negative valence: force, threat, fury ─────────────────
+  aggressive: { energy: 85, valence: 30, intensity: 85, acousticness: 25, density: 76, gloss: "attacking; force is the message" },
+  furious: { energy: 92, valence: 24, intensity: 92, acousticness: 28, density: 82, gloss: "flat-out rage at full tilt" },
+  menacing: { energy: 68, valence: 24, intensity: 74, acousticness: 20, density: 64, gloss: "threat held just below the surface" },
+  frantic: { energy: 90, valence: 42, intensity: 70, acousticness: 38, density: 70, gloss: "too fast to hold on to" },
+  savage: { energy: 88, valence: 20, intensity: 90, acousticness: 30, density: 80, gloss: "brutal and unpolished" },
+  // ── timbre-led: chosen for HOW it sounds, across the quadrants ──────────
+  heavy: { energy: 72, valence: 34, intensity: 82, acousticness: 32, density: 78, gloss: "downtuned mass; the low end dominates" },
+  gritty: { energy: 62, valence: 42, intensity: 62, acousticness: 45, density: 55, gloss: "dirt on the signal; unsmoothed" },
+  fuzzy: { energy: 58, valence: 48, intensity: 58, acousticness: 42, density: 60, gloss: "saturated and woolly-edged" },
+  glossy: { energy: 55, valence: 65, intensity: 40, acousticness: 15, density: 62, gloss: "polished studio sheen" },
+  shimmering: { energy: 45, valence: 66, intensity: 32, acousticness: 30, density: 55, gloss: "bright high-end, glittering" },
+  pulsing: { energy: 60, valence: 55, intensity: 45, acousticness: 12, density: 58, gloss: "steady synthetic throb" },
+  cold: { energy: 50, valence: 32, intensity: 50, acousticness: 15, density: 45, gloss: "clinical, unwarmed by the room" },
+  sparse: { energy: 28, valence: 45, intensity: 22, acousticness: 60, density: 12, gloss: "few elements, lots of silence" },
+  lush: { energy: 45, valence: 60, intensity: 35, acousticness: 55, density: 85, gloss: "many layers, richly filled in" },
+  raucous: { energy: 78, valence: 62, intensity: 68, acousticness: 45, density: 70, gloss: "loud, rowdy, spilling over" },
+  hypnotic: { energy: 45, valence: 48, intensity: 35, acousticness: 30, density: 50, gloss: "repetition that pulls you under" },
+  stark: { energy: 30, valence: 30, intensity: 35, acousticness: 45, density: 15, gloss: "bare and unsoftened" }
+};
+var MOOD_VOCABULARY = Object.keys(MOOD_ANCHORS);
+var CANON = new Set(Object.keys(MOOD_ANCHORS));
+var SYNONYMS = {
+  angry: "furious",
+  ferocious: "furious",
+  enraged: "furious",
+  abrasive: "aggressive",
+  violent: "aggressive",
+  punishing: "aggressive",
+  sinister: "menacing",
+  ominous: "menacing",
+  dark: "menacing",
+  crushing: "heavy",
+  pounding: "heavy",
+  thunderous: "heavy",
+  "bass-heavy": "heavy",
+  raw: "gritty",
+  scrappy: "gritty",
+  rough: "gritty",
+  distorted: "fuzzy",
+  saturated: "fuzzy",
+  slick: "glossy",
+  polished: "glossy",
+  sleek: "glossy",
+  clean: "glossy",
+  sparkling: "shimmering",
+  glistening: "shimmering",
+  twinkling: "shimmering",
+  throbbing: "pulsing",
+  pumping: "pulsing",
+  motorik: "pulsing",
+  icy: "cold",
+  clinical: "cold",
+  detached: "cold",
+  minimal: "sparse",
+  skeletal: "sparse",
+  spare: "sparse",
+  layered: "lush",
+  orchestral: "lush",
+  symphonic: "lush",
+  widescreen: "lush",
+  rowdy: "raucous",
+  boisterous: "raucous",
+  unruly: "raucous",
+  trancey: "hypnotic",
+  looping: "hypnotic",
+  droning: "hypnotic",
+  bare: "stark",
+  austere: "stark",
+  calm: "serene",
+  peaceful: "serene",
+  tranquil: "serene",
+  still: "serene",
+  soft: "gentle",
+  delicate: "gentle",
+  fragile: "gentle",
+  cosy: "warm",
+  cozy: "warm",
+  comforting: "warm",
+  laidback: "mellow",
+  "laid-back": "mellow",
+  chill: "mellow",
+  relaxed: "mellow",
+  rustic: "pastoral",
+  folksy: "pastoral",
+  bucolic: "pastoral",
+  quiet: "hushed",
+  whispered: "hushed",
+  hazy: "dreamy",
+  ethereal: "dreamy",
+  woozy: "dreamy",
+  floaty: "dreamy",
+  sad: "melancholy",
+  sorrowful: "melancholy",
+  downcast: "melancholy",
+  grieving: "mournful",
+  elegiac: "mournful",
+  funereal: "mournful",
+  desolate: "bleak",
+  barren: "bleak",
+  grim: "bleak",
+  tired: "weary",
+  resigned: "weary",
+  worn: "weary",
+  yearning: "wistful",
+  longing: "wistful",
+  nostalgic: "wistful",
+  bright: "sunny",
+  cheerful: "sunny",
+  upbeat: "sunny",
+  charming: "sweet",
+  endearing: "sweet",
+  romantic: "sweet",
+  whimsical: "playful",
+  cheeky: "playful",
+  giddy: "playful",
+  breezily: "breezy",
+  carefree: "breezy",
+  easygoing: "breezy",
+  soulful: "groovy",
+  "in-the-pocket": "groovy",
+  syncopated: "funky",
+  strutting: "funky",
+  swung: "swinging",
+  jazzy: "swinging",
+  jolly: "jaunty",
+  sprightly: "jaunty",
+  overcast: "moody",
+  sullen: "moody",
+  introspective: "moody",
+  simmering: "brooding",
+  ominously: "brooding",
+  anxious: "tense",
+  uneasy: "tense",
+  nervy: "tense",
+  agitated: "restless",
+  jittery: "restless",
+  antsy: "restless",
+  sultry: "smouldering",
+  smoldering: "smouldering",
+  seductive: "smouldering",
+  rebellious: "defiant",
+  confrontational: "defiant",
+  swaggering: "defiant",
+  ecstatic: "euphoric",
+  rapturous: "euphoric",
+  blissful: "euphoric",
+  joyful: "exuberant",
+  jubilant: "exuberant",
+  celebratory: "exuberant",
+  victorious: "triumphant",
+  heroic: "triumphant",
+  soaring: "triumphant",
+  singalong: "anthemic",
+  stadium: "anthemic",
+  rousing: "anthemic",
+  propulsive: "driving",
+  insistent: "driving",
+  motoring: "driving",
+  clubby: "danceable",
+  "club-ready": "danceable",
+  dancey: "danceable",
+  party: "danceable",
+  chaotic: "frantic",
+  breakneck: "frantic",
+  manic: "frantic",
+  brutal: "savage",
+  vicious: "savage",
+  feral: "savage"
+};
+function canonicalise(raw) {
+  const w = raw.trim().toLowerCase();
+  if (CANON.has(w)) return w;
+  if (SYNONYMS[w]) return SYNONYMS[w];
+  const squashed = w.replace(/[\s_]+/g, "-");
+  if (CANON.has(squashed)) return squashed;
+  if (SYNONYMS[squashed]) return SYNONYMS[squashed];
+  return null;
+}
+var UNIVERSAL_VIBES = {
+  "wind down": { centre: { energy: 20, valence: 52, intensity: 14, acousticness: 78, density: 24 }, radius: 21, tempo: ["still", "slow"], hours: [21, 22, 23, 0, 1], gloss: "settling toward sleep" },
+  "slow morning": { centre: { energy: 32, valence: 62, intensity: 22, acousticness: 70, density: 34 }, radius: 19, tempo: ["slow", "mid"], hours: [6, 7, 8, 9], gloss: "easing into the day" },
+  "focus": { centre: { energy: 42, valence: 50, intensity: 28, acousticness: 40, density: 40 }, radius: 18, vocal: ["instrumental"], hours: [9, 10, 11, 14, 15, 16], gloss: "steady, undemanding, stays out of the way" },
+  "background": { centre: { energy: 38, valence: 58, intensity: 25, acousticness: 55, density: 38 }, radius: 18, hours: [11, 12, 13, 14], gloss: "pleasant and unobtrusive" },
+  "uplift": { centre: { energy: 68, valence: 80, intensity: 42, acousticness: 45, density: 58 }, radius: 21, valence: [55, 100], hours: [8, 9, 10, 16, 17], gloss: "a deliberate lift in mood" },
+  "workout": { centre: { energy: 84, valence: 62, intensity: 70, acousticness: 25, density: 72 }, radius: 20, tempo: ["driving", "frantic"], hours: [6, 7, 17, 18, 19], gloss: "sustained physical push" },
+  "hype": { centre: { energy: 86, valence: 70, intensity: 66, acousticness: 18, density: 74 }, radius: 24, valence: [50, 100], hours: [20, 21, 22], gloss: "getting up for something" },
+  "driving": { centre: { energy: 70, valence: 60, intensity: 58, acousticness: 40, density: 62 }, radius: 18, tempo: ["mid", "driving"], hours: [8, 9, 16, 17, 18], gloss: "motion; miles passing" },
+  "golden hour": { centre: { energy: 48, valence: 68, intensity: 32, acousticness: 55, density: 46 }, radius: 20, valence: [45, 100], hours: [17, 18, 19], gloss: "warm light, day easing off" },
+  "late night": { centre: { energy: 40, valence: 40, intensity: 38, acousticness: 35, density: 45 }, radius: 18, hours: [23, 0, 1, 2, 3], gloss: "after hours; low light" },
+  "melancholy": { centre: { energy: 28, valence: 24, intensity: 24, acousticness: 65, density: 32 }, radius: 22, valence: [0, 45], hours: [21, 22, 23], gloss: "sitting with something sad" },
+  "heavy": { centre: { energy: 80, valence: 32, intensity: 84, acousticness: 28, density: 78 }, radius: 24, valence: [0, 55], hours: [15, 16, 17, 21, 22], gloss: "loud, dark and physical" },
+  "dinner": { centre: { energy: 40, valence: 66, intensity: 26, acousticness: 68, density: 40 }, radius: 19, hours: [18, 19, 20], gloss: "convivial but not competing with conversation" },
+  "party": { centre: { energy: 80, valence: 82, intensity: 50, acousticness: 20, density: 72 }, radius: 23, valence: [55, 100], hours: [20, 21, 22, 23], gloss: "a room full of people" }
+};
+var VIBE_NAMES = Object.keys(UNIVERSAL_VIBES);
+function vibesFor(p, max = 3) {
+  const out = [];
+  for (const [vibe, def] of Object.entries(UNIVERSAL_VIBES)) {
+    if (def.valence && (p.valence < def.valence[0] || p.valence > def.valence[1])) continue;
+    if (def.tempo && !def.tempo.includes(p.tempoFeel)) continue;
+    if (def.vocal && !def.vocal.includes(p.vocal)) continue;
+    const distance = numericDistance(p, def.centre);
+    if (distance > def.radius) continue;
+    out.push({ vibe, distance: Number(distance.toFixed(1)) });
+  }
+  return out.sort((a, b) => a.distance - b.distance).slice(0, max);
+}
+
 // src/daylist.ts
 var PART_OF_DAY = [
   [5, "late night"],
@@ -139,36 +465,43 @@ function hourWindow(hour, spread = 1) {
 function vibeFits(store2, hour, spread = 1) {
   const window = new Set(hourWindow(hour, spread));
   const windowShare = window.size / 24;
-  const out = [];
-  const extended = /* @__PURE__ */ new Map();
+  const members = /* @__PURE__ */ new Map();
   for (const t of store2.tracks) {
-    for (const v of t.mood?.vibes ?? []) {
-      if (!t.vibes.includes(v)) extended.set(v, (extended.get(v) ?? 0) + 1);
+    for (const v of t.moodVibes ?? []) {
+      const arr = members.get(v.vibe);
+      if (arr) arr.push(t);
+      else members.set(v.vibe, [t]);
     }
   }
-  for (const [vibe, ids] of Object.entries(store2.vibes)) {
+  const out = [];
+  for (const [vibe, def] of Object.entries(UNIVERSAL_VIBES)) {
+    const tracks = members.get(vibe) ?? [];
     let inWindow = 0;
     let totalListens = 0;
     const artistCounts = /* @__PURE__ */ new Map();
-    for (const id of ids) {
-      const t = store2.byId.get(id);
-      if (!t || !t.listens) continue;
+    for (const t of tracks) {
+      if (!t.listens) continue;
       totalListens += t.listens;
       for (const h of window) inWindow += t.hourHist[h] ?? 0;
       artistCounts.set(t.artist, (artistCounts.get(t.artist) ?? 0) + t.listens);
     }
-    if (!totalListens) continue;
-    const observed = inWindow / totalListens;
     out.push({
       vibe,
-      tracks: ids.length,
-      extended_tracks: extended.get(vibe) ?? 0,
+      gloss: def.gloss,
+      tracks: tracks.length,
       listens_in_window: inWindow,
-      lift: Number((observed / windowShare).toFixed(2)),
+      lift: totalListens ? Number((inWindow / totalListens / windowShare).toFixed(2)) : null,
+      suits_hour: def.hours.includes(hour),
       top_artists: [...artistCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([a]) => a)
     });
   }
-  return out.sort((a, b) => b.lift - a.lift);
+  return out.sort((a, b) => {
+    if (a.lift !== null && b.lift !== null) return b.lift - a.lift;
+    if (a.lift !== null) return -1;
+    if (b.lift !== null) return 1;
+    if (a.suits_hour !== b.suits_hour) return a.suits_hour ? -1 : 1;
+    return b.tracks - a.tracks;
+  });
 }
 function hourProfile(store2, hour, spread = 1) {
   const window = new Set(hourWindow(hour, spread));
@@ -531,6 +864,9 @@ function containsAny(hay, needles) {
   const h = norm(hay);
   return needles.some((n) => h.includes(norm(n)));
 }
+function wantedMoods(raw) {
+  return raw.map((r) => canonicalise(r) ?? r.trim().toLowerCase());
+}
 function search(store2, p) {
   const now = Date.now();
   const nowSec = Math.floor(now / 1e3);
@@ -544,6 +880,8 @@ function search(store2, p) {
   );
   const releasedAfter = p.released_after ? Date.parse(p.released_after) : NaN;
   const releasedBefore = p.released_before ? Date.parse(p.released_before) : NaN;
+  const wantMoods = p.moods?.length ? wantedMoods(p.moods) : void 0;
+  const banMoods = p.exclude_moods?.length ? wantedMoods(p.exclude_moods) : void 0;
   const out = [];
   for (const t of store2.tracks) {
     if (!p.include_missing && t.missing) continue;
@@ -599,11 +937,10 @@ function search(store2, p) {
     if (p.bpm_max !== void 0 && !(t.bpm && t.bpm <= p.bpm_max)) continue;
     if (p.starred !== void 0 && t.starred !== p.starred) continue;
     if (p.mood_vibes?.length) {
-      const guessed = (t.guessedVibes ?? []).map((g) => g.vibe);
-      const all = [...t.vibes, ...t.mood?.vibes ?? [], ...guessed];
-      if (!anyMatch(all, p.mood_vibes)) continue;
+      const regions = (t.moodVibes ?? []).map((g) => g.vibe);
+      if (!anyMatch([...regions, ...t.vibes], p.mood_vibes)) continue;
     }
-    const needsMood = p.energy_min !== void 0 || p.energy_max !== void 0 || p.valence_min !== void 0 || p.valence_max !== void 0 || p.intensity_min !== void 0 || p.intensity_max !== void 0 || p.organic_min !== void 0 || p.organic_max !== void 0 || Boolean(p.moods?.length) || Boolean(p.fits_time);
+    const needsMood = p.energy_min !== void 0 || p.energy_max !== void 0 || p.valence_min !== void 0 || p.valence_max !== void 0 || p.intensity_min !== void 0 || p.intensity_max !== void 0 || p.acousticness_min !== void 0 || p.acousticness_max !== void 0 || p.density_min !== void 0 || p.density_max !== void 0 || Boolean(p.tempo_feel?.length) || Boolean(p.vocal?.length) || Boolean(p.moods?.length) || Boolean(p.fits_time);
     if (needsMood) {
       const m = t.mood;
       if (!m) continue;
@@ -613,18 +950,16 @@ function search(store2, p) {
       if (p.valence_max !== void 0 && m.valence > p.valence_max) continue;
       if (p.intensity_min !== void 0 && m.intensity < p.intensity_min) continue;
       if (p.intensity_max !== void 0 && m.intensity > p.intensity_max) continue;
-      if (p.organic_min !== void 0 && m.organic < p.organic_min) continue;
-      if (p.organic_max !== void 0 && m.organic > p.organic_max) continue;
-      if (p.moods?.length) {
-        const want = p.moods.map((x) => x.toLowerCase());
-        if (!want.some((w) => m.moods.some((x) => x.includes(w)))) continue;
-      }
+      if (p.acousticness_min !== void 0 && m.acousticness < p.acousticness_min) continue;
+      if (p.acousticness_max !== void 0 && m.acousticness > p.acousticness_max) continue;
+      if (p.density_min !== void 0 && m.density < p.density_min) continue;
+      if (p.density_max !== void 0 && m.density > p.density_max) continue;
+      if (p.tempo_feel?.length && !p.tempo_feel.includes(m.tempoFeel)) continue;
+      if (p.vocal?.length && !p.vocal.includes(m.vocal)) continue;
+      if (wantMoods && !wantMoods.some((w) => m.moods.some((x) => x.includes(w)))) continue;
       if (p.fits_time && !m.times.some((x) => x.toLowerCase() === p.fits_time.toLowerCase())) continue;
     }
-    if (p.exclude_moods?.length && t.mood) {
-      const bad = p.exclude_moods.map((x) => x.toLowerCase());
-      if (bad.some((w) => t.mood.moods.some((x) => x.includes(w)))) continue;
-    }
+    if (banMoods && t.mood && banMoods.some((w) => t.mood.moods.some((x) => x.includes(w)))) continue;
     out.push(t);
   }
   const total = out.length;
@@ -735,18 +1070,20 @@ function brief(t) {
     plays: t.playCount || void 0,
     listens: t.listens || void 0,
     last_listened: t.lastListen ? new Date(t.lastListen * 1e3).toISOString().slice(0, 10) : void 0,
-    vibes: t.vibes.length ? t.vibes : void 0,
-    reads_as: t.vibes.length ? void 0 : t.guessedVibes?.length ? t.guessedVibes.map((g) => `${g.vibe} (${g.score})`) : void 0,
+    playlists: t.vibes.length ? t.vibes : void 0,
     tags: t.tags.length ? t.tags.slice(0, 6).map((x) => x.name) : void 0,
     starred: t.starred || void 0,
     mood: t.mood ? {
       energy: t.mood.energy,
       valence: t.mood.valence,
       intensity: t.mood.intensity,
-      organic: t.mood.organic,
+      acousticness: t.mood.acousticness,
+      density: t.mood.density,
+      tempo: t.mood.tempoFeel,
+      vocal: t.mood.vocal,
       moods: t.mood.moods,
       fits: t.mood.times,
-      reads_as: t.mood.vibes.length ? t.mood.vibes : void 0
+      vibes: t.moodVibes?.length ? t.moodVibes.map((v) => v.vibe) : void 0
     } : void 0
   };
 }
@@ -853,46 +1190,54 @@ var TIME_SLOTS = [
 var BATCH = 40;
 var CONCURRENCY = Number(process.env.MOOD_CONCURRENCY ?? 32) || 32;
 var DEFAULT_MODEL = "claude-opus-5";
-function taxonomyPrompt(store2, vibeNames) {
-  const lines = [];
-  lines.push(
-    "You are labelling a personal music library so it can be searched by mood.",
+function taxonomyPrompt() {
+  const axis = (name, lo, hi) => `  ${name.padEnd(13)} 0-100  ${lo} -> ${hi}`;
+  const lines = [
+    "You are labelling a music library so it can be searched and sequenced by mood.",
     "",
-    "The listener has hand-curated playlists that ARE his mood vocabulary. Your job is to",
-    "extend that vocabulary to every track in his library, including tracks that never made",
-    "it onto one of these playlists. Judge each track on how it actually sounds and feels,",
-    "not on its genre label or its popularity.",
+    "Judge each track on how it actually SOUNDS, not on its genre label, its lyrics, its",
+    "reputation or its popularity. Two tracks with the same label should be usable one after",
+    "the other without the transition feeling wrong.",
     "",
-    "His curated vibes, with real examples of each:",
+    "## Axes",
+    "",
+    axis("energy", "still and sleepy", "frantic activity"),
+    axis("valence", "bleak", "joyful"),
+    axis("intensity", "gentle", "heavy and aggressive"),
+    axis("acousticness", "fully electronic", "fully acoustic"),
+    axis("density", "sparse, one or two elements", "wall of sound"),
+    "",
+    `  tempoFeel     one of: ${TEMPO_FEELS.join(", ")}  (how fast it FEELS, not its BPM)`,
+    `  vocal         one of: ${VOCAL_KINDS.join(", ")}`,
+    "",
+    "Be decisive and use the full range -- clustering everything near 50 makes the labels",
+    "useless. `density` is about how much is happening at once: a solo voice is low even when",
+    "it is loud, a shoegaze wall is high even when it is calm.",
+    "",
+    "## Vocabulary",
+    "",
+    "Pick 2-4 `moods` from this list and nothing else. Each term is a fixed REGION of the",
+    "space above, given as its coordinates (E/V/I/A/D) and what it means. Choose the terms",
+    "whose regions your numbers actually land in -- the two should agree.",
     ""
-  );
-  for (const name of vibeNames) {
-    const ids = store2.vibes[name] ?? [];
-    const tracks = ids.map((id) => store2.byId.get(id)).filter((t) => Boolean(t));
-    const step = Math.max(1, Math.floor(tracks.length / 18));
-    const sample = tracks.filter((_, i) => i % step === 0).slice(0, 18);
-    const genres = /* @__PURE__ */ new Map();
-    for (const t of tracks) for (const g of t.genres) genres.set(g, (genres.get(g) ?? 0) + 1);
-    const topGenres = [...genres.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([g]) => g).join(", ");
-    lines.push(
-      `## ${name}  (${tracks.length} tracks; mostly ${topGenres || "mixed"})`,
-      ...sample.map((t) => `  - ${t.artist} \u2014 ${t.title}${t.year ? ` (${t.year})` : ""}`),
-      ""
-    );
+  ];
+  for (const [term, a] of Object.entries(MOOD_ANCHORS)) {
+    const coords = `E${a.energy} V${a.valence} I${a.intensity} A${a.acousticness} D${a.density}`;
+    lines.push(`  ${term.padEnd(12)} ${coords.padEnd(28)} ${a.gloss}`);
   }
   lines.push(
-    "For each track you are given, return:",
-    "  energy    0-100  sleepy and still -> frantic",
-    "  valence   0-100  bleak or melancholy -> bright and joyful",
-    "  intensity 0-100  gentle -> heavy and aggressive",
-    "  organic   0-100  fully electronic -> fully acoustic",
-    "  moods     2-4 short descriptors of the feeling (e.g. hazy, anthemic, wistful, menacing)",
-    `  vibes     0-3 of his curated vibe names, ONLY where the track genuinely belongs: ${vibeNames.join(", ")}`,
-    `  times     when it fits, from: ${TIME_SLOTS.join(", ")}`,
     "",
-    "Be decisive and use the full range of each axis -- clustering everything near 50 makes",
-    "the labels useless. Leave `vibes` empty rather than forcing a weak match. If you do not",
-    "recognise a track, infer from the artist and era rather than guessing at random.",
+    "## Times of day",
+    "",
+    `  times  when the track fits, from: ${TIME_SLOTS.join(", ")}`,
+    "",
+    "Judge this by the sound, not by habit: quiet and spacious suits late night, bright and",
+    "propulsive suits morning. Give every track at least one.",
+    "",
+    "## Notes",
+    "",
+    "Do not guess at random. If a track is unfamiliar, infer from the artist, the album and",
+    "the era -- an informed placement is far more useful than a hedged one at 50.",
     "Return one entry per track, preserving the given id exactly."
   );
   return lines.join("\n");
@@ -906,27 +1251,43 @@ var SCHEMA = {
         type: "object",
         properties: {
           id: { type: "string", description: "The track id exactly as given." },
-          energy: { type: "integer", description: "0-100, sleepy to frantic." },
+          energy: { type: "integer", description: "0-100, still to frantic." },
           valence: { type: "integer", description: "0-100, bleak to joyful." },
           intensity: { type: "integer", description: "0-100, gentle to aggressive." },
-          organic: { type: "integer", description: "0-100, electronic to acoustic." },
+          acousticness: { type: "integer", description: "0-100, electronic to acoustic." },
+          density: { type: "integer", description: "0-100, sparse to wall-of-sound." },
+          tempoFeel: {
+            type: "string",
+            enum: [...TEMPO_FEELS],
+            description: "How fast the track feels."
+          },
+          vocal: { type: "string", enum: [...VOCAL_KINDS] },
           moods: {
             type: "array",
-            items: { type: "string" },
-            description: "2-4 short lowercase feeling descriptors."
-          },
-          vibes: {
-            type: "array",
-            items: { type: "string" },
-            description: "0-3 curated vibe names this track belongs with."
+            items: { type: "string", enum: [...MOOD_VOCABULARY] },
+            minItems: 2,
+            maxItems: 4,
+            description: "2-4 terms from the vocabulary, matching the axes given."
           },
           times: {
             type: "array",
             items: { type: "string", enum: [...TIME_SLOTS] },
+            minItems: 1,
             description: "Times of day the track fits."
           }
         },
-        required: ["id", "energy", "valence", "intensity", "organic", "moods", "vibes", "times"],
+        required: [
+          "id",
+          "energy",
+          "valence",
+          "intensity",
+          "acousticness",
+          "density",
+          "tempoFeel",
+          "vocal",
+          "moods",
+          "times"
+        ],
         additionalProperties: false
       }
     }
@@ -941,8 +1302,7 @@ function describe(t) {
     t.year ? `(${t.year})` : "",
     t.album ? `album: ${t.album}` : "",
     t.genres.length ? `genre: ${t.genres.join("/")}` : "",
-    t.tags.length ? `tags: ${t.tags.slice(0, 8).map((x) => x.name).join(", ")}` : "",
-    t.vibes.length ? `ALREADY ON: ${t.vibes.join(", ")}` : ""
+    t.tags.length ? `tags: ${t.tags.slice(0, 8).map((x) => x.name).join(", ")}` : ""
   ].filter(Boolean);
   return bits.join(" | ");
 }
@@ -1052,9 +1412,8 @@ ${batch.map(describe).join("\n")}`
    * enrichment. So this is the default for a full run; the synchronous path is
    * kept for small trial runs where waiting on a queue is the worse deal.
    */
-  async runBatched(store2, pending, onBatch) {
-    const vibeNames = Object.keys(store2.vibes);
-    const system = taxonomyPrompt(store2, vibeNames);
+  async runBatched(pending, onBatch) {
+    const system = taxonomyPrompt();
     const batches = [];
     for (let i = 0; i < pending.length; i += BATCH) batches.push(pending.slice(i, i + BATCH));
     this.progress = {
@@ -1128,8 +1487,7 @@ ${batch.map(describe).join("\n")}`
    * the batch in flight.
    */
   async run(store2, pending, onBatch) {
-    const vibeNames = Object.keys(store2.vibes);
-    const system = taxonomyPrompt(store2, vibeNames);
+    const system = taxonomyPrompt();
     const batches = [];
     for (let i = 0; i < pending.length; i += BATCH) batches.push(pending.slice(i, i + BATCH));
     this.progress = {
@@ -1180,79 +1538,8 @@ ${batch.map(describe).join("\n")}`
   }
 };
 
-// src/propagate.ts
-function unit(v) {
-  let n = 0;
-  for (const x of v.values()) n += x * x;
-  n = Math.sqrt(n) || 1;
-  for (const [k, x] of v) v.set(k, x / n);
-  return v;
-}
-function cosine(a, b) {
-  const [small, big] = a.size < b.size ? [a, b] : [b, a];
-  let s = 0;
-  for (const [k, x] of small) {
-    const y = big.get(k);
-    if (y) s += x * y;
-  }
-  return s;
-}
-function propagateVibes(tracks, opts = {}) {
-  const topN = opts.topN ?? 3;
-  const minScore = opts.minScore ?? 0.12;
-  const df = /* @__PURE__ */ new Map();
-  for (const t of tracks) {
-    for (const tag of t.tags) df.set(tag.name, (df.get(tag.name) ?? 0) + 1);
-  }
-  const N = Math.max(1, tracks.length);
-  const idf = (name) => Math.log(N / (1 + (df.get(name) ?? 0)));
-  const vectorOf = (t) => {
-    if (!t.tags.length) return null;
-    const v = /* @__PURE__ */ new Map();
-    for (const tag of t.tags) v.set(tag.name, tag.count / 100 * idf(tag.name));
-    return unit(v);
-  };
-  const centroids = /* @__PURE__ */ new Map();
-  const seen = /* @__PURE__ */ new Map();
-  let trained = 0;
-  for (const t of tracks) {
-    if (!t.vibes.length) continue;
-    const v = vectorOf(t);
-    if (!v) continue;
-    trained++;
-    for (const name of t.vibes) {
-      let c = centroids.get(name);
-      if (!c) {
-        c = /* @__PURE__ */ new Map();
-        centroids.set(name, c);
-      }
-      for (const [k, x] of v) c.set(k, (c.get(k) ?? 0) + x);
-      seen.set(name, (seen.get(name) ?? 0) + 1);
-    }
-  }
-  for (const c of centroids.values()) unit(c);
-  const guesses = /* @__PURE__ */ new Map();
-  let predicted = 0;
-  for (const t of tracks) {
-    if (t.vibes.length) continue;
-    const v = vectorOf(t);
-    if (!v) continue;
-    const scored = [];
-    for (const [vibe, c] of centroids) {
-      if (!seen.get(vibe)) continue;
-      const s = cosine(v, c);
-      if (s >= minScore) scored.push({ vibe, score: Number(s.toFixed(3)) });
-    }
-    if (!scored.length) continue;
-    scored.sort((a, b) => b.score - a.score);
-    guesses.set(t.id, scored.slice(0, topN));
-    predicted++;
-  }
-  return { guesses, trained, predicted };
-}
-
 // src/store.ts
-var SNAPSHOT_VERSION = 4;
+var SNAPSHOT_VERSION = 5;
 function log(msg) {
   console.error(`[navidrome-mcp] ${msg}`);
 }
@@ -1433,11 +1720,11 @@ var Store = class {
     return { tracks: this.tracks.length, vibes: Object.keys(vibes).length };
   }
   /**
-   * Which playlists represent the user's own mood vocabulary.
+   * Which playlists count as hand-curated taste signal.
    *
    * Excluded: the rolling daylist (it is our own output, so treating it as taste
    * input would feed the generator its own tail), and anything the ListenBrainz
-   * plugin imported (those are LB's recommendations, not his labels).
+   * plugin imported (those are recommendations, not the listener's own filing).
    */
   isNonVibePlaylist(p) {
     const name = (p.name ?? "").toLowerCase();
@@ -1525,7 +1812,6 @@ var Store = class {
     this.byId = new Map(this.tracks.map((t) => [t.id, t]));
     this.applyTags();
     this.applyMoods();
-    this.applyPropagation();
     this.applyListenStats();
   }
   applyTags() {
@@ -1539,30 +1825,20 @@ var Store = class {
       t.tags = at ? at.slice(0, 10) : [];
     }
   }
+  /** Attach mood labels and the vibe membership that falls out of them. */
   applyMoods() {
-    for (const t of this.tracks) t.mood = this.moods[t.id];
+    for (const t of this.tracks) {
+      t.mood = this.moods[t.id];
+      t.moodVibes = t.mood ? vibesFor(t.mood) : void 0;
+    }
   }
-  /**
-   * Re-derive predicted vibes. Cheap (milliseconds) and derived purely from data
-   * already in memory, so it is re-run whenever tags change rather than cached.
-   */
-  propagation = {
-    trained: 0,
-    predicted: 0,
-    coverage: 0
-  };
-  applyPropagation() {
-    if (!this.tracks.length) return;
-    const { guesses, trained, predicted } = propagateVibes(
-      this.tracks.map((t) => ({ id: t.id, tags: t.tags, vibes: t.vibes }))
-    );
-    for (const t of this.tracks) t.guessedVibes = guesses.get(t.id);
-    const covered = this.tracks.filter((t) => t.vibes.length || t.guessedVibes?.length).length;
-    this.propagation = {
-      trained,
-      predicted,
-      coverage: Number((100 * covered / this.tracks.length).toFixed(1))
-    };
+  /** How many tracks land in each vibe region. */
+  vibeHistogram() {
+    const counts = /* @__PURE__ */ new Map();
+    for (const t of this.tracks) {
+      for (const v of t.moodVibes ?? []) counts.set(v.vibe, (counts.get(v.vibe) ?? 0) + 1);
+    }
+    return [...counts.entries()].map(([vibe, tracks]) => ({ vibe, tracks })).sort((a, b) => b.tracks - a.tracks);
   }
   /** How much of the library has a mood label yet. */
   moodCoverage() {
@@ -1593,7 +1869,7 @@ var Store = class {
       this.applyMoods();
       await this.saveSnapshotSoon();
     };
-    void (useBatch ? this.mood.runBatched(this, pending, onRows) : this.mood.run(this, pending, onRows)).then(() => log(`mood: finished, ${this.tracks.filter((t) => t.mood).length} labelled`)).catch((e) => log(`mood: failed: ${String(e)}`));
+    void (useBatch ? this.mood.runBatched(pending, onRows) : this.mood.run(this, pending, onRows)).then(() => log(`mood: finished, ${this.tracks.filter((t) => t.mood).length} labelled`)).catch((e) => log(`mood: failed: ${String(e)}`));
     return { started: pending.length, mode: useBatch ? "batch" : "sync" };
   }
   /**
@@ -1671,12 +1947,10 @@ var Store = class {
         if (++n % 100 === 0) {
           this.enrichState.done = n;
           this.applyTags();
-          this.applyPropagation();
           await this.saveSnapshot();
         }
       }
       this.applyTags();
-      this.applyPropagation();
       await this.saveSnapshot();
       this.enrichState = {
         running: true,
@@ -1693,12 +1967,10 @@ var Store = class {
         if (++n % 100 === 0) {
           this.enrichState.done = n;
           this.applyTags();
-          this.applyPropagation();
           await this.saveSnapshot();
         }
       }
       this.applyTags();
-      this.applyPropagation();
       await this.saveSnapshot();
     } catch {
     } finally {
@@ -1821,16 +2093,19 @@ server.registerTool(
   "describe_library",
   {
     title: "Describe the music library",
-    description: "Orientation for the whole library: size, genre and decade distribution, the user's own curated mood playlists (his personal vibe vocabulary), the Last.fm tag vocabulary available for filtering, and listening-history coverage. Call this FIRST when you need to build a playlist and do not yet know what the library contains.",
+    description: "Orientation for the whole library: size, genre and decade distribution, how the library spreads across the universal mood regions, the Last.fm tag vocabulary available for filtering, and how much listening history and mood labelling exist to work with. Call this FIRST when you need to build a playlist and do not yet know what the library contains.",
     inputSchema: {},
     annotations: { readOnlyHint: true }
   },
   tool(async () => {
     const totalSec = store.tracks.reduce((a, t) => a + t.duration, 0);
     const withListens = store.tracks.filter((t) => t.listens > 0).length;
-    const vibes = Object.entries(store.vibes).map(([name, ids]) => ({ vibe: name, tracks: ids.length })).sort((a, b) => b.tracks - a.tracks);
+    const playlists = Object.entries(store.vibes).map(([name, ids]) => ({ playlist: name, tracks: ids.length })).sort((a, b) => b.tracks - a.tracks);
+    const coverage = store.moodCoverage();
+    const labelled = coverage.labelled;
+    const regionCounts = new Map(store.vibeHistogram().map((v) => [v.vibe, v.tracks]));
     return result(
-      `Library: ${store.tracks.length} tracks, ${fmtDuration(totalSec)} total. ${vibes.length} curated mood playlists. ${store.listens.length} ListenBrainz listens on file (${withListens} tracks matched).`,
+      `Library: ${store.tracks.length} tracks, ${fmtDuration(totalSec)} total. ${labelled} of ${store.tracks.length} mood-labelled. ${store.listens.length} listens on file (${withListens} tracks matched).`,
       {
         tracks: store.tracks.length,
         missing_files: store.tracks.filter((t) => t.missing).length,
@@ -1838,7 +2113,6 @@ server.registerTool(
         albums: new Set(store.tracks.map((t) => t.albumId)).size,
         total_duration: fmtDuration(totalSec),
         library_synced_at: new Date(store.syncedAt).toISOString(),
-        curated_vibes: vibes,
         genres: store.genreHistogram(),
         decades: store.decadeHistogram(),
         tag_vocabulary: store.tagVocabulary(80),
@@ -1849,10 +2123,15 @@ server.registerTool(
           newest: store.listens.length ? new Date(store.listens[store.listens.length - 1].ts * 1e3).toISOString().slice(0, 10) : null
         },
         tag_enrichment: store.enrichState,
-        mood_coverage: store.moodCoverage(),
-        vibe_propagation: store.propagation,
+        mood_coverage: coverage,
+        vibe_regions: Object.entries(UNIVERSAL_VIBES).map(([vibe, d]) => ({
+          vibe,
+          gloss: d.gloss,
+          tracks: regionCounts.get(vibe) ?? 0
+        })),
         mood_vocabulary: store.moodVocabulary(60),
-        note: "The whole library is a favourites sync, so every track here is already something he liked. Selection is about fit for the moment, not about whether he likes it. Use `mood_vibes` to reach the whole library: it matches hand-curated membership PLUS tracks predicted to belong by tag similarity to his own playlists (measured 63% top-1 / 85% top-2 on a holdout). Plain `vibes` matches only the ~3,800 tracks he filed by hand. The numeric mood axes need the mood pass, which is separate."
+        curated_playlists: playlists.length ? playlists : void 0,
+        note: labelled === 0 ? "No tracks are mood-labelled yet, so the mood axes, `mood_vibes` and `fits_time` will match nothing. Run `enrich_moods` first, or fall back to genres, tags and listening history." : "Vibe regions are fixed definitions in mood-space, not this library's playlists, so `mood_vibes` means the same thing everywhere. `vibes` is different: it matches only tracks the listener filed onto a playlist by hand, which most libraries have little or none of." + (playlists.length ? "" : " This library has no curated playlists, so `vibes` will match nothing.")
       }
     );
   })
@@ -1867,7 +2146,9 @@ var searchShape = {
   tags: z.array(z.string()).optional().describe("Last.fm tags, e.g. ['shoegaze','melancholy']."),
   tags_mode: z.enum(["any", "all"]).optional().describe("Default 'any'."),
   exclude_tags: z.array(z.string()).optional(),
-  vibes: z.array(z.string()).optional().describe("Restrict to tracks on these curated playlists, e.g. ['golden hour','textured']."),
+  vibes: z.array(z.string()).optional().describe(
+    "Restrict to tracks the listener filed onto these named playlists by hand. Most libraries have few or none \u2014 prefer `mood_vibes`."
+  ),
   exclude_vibes: z.array(z.string()).optional(),
   year_min: z.number().int().optional(),
   year_max: z.number().int().optional(),
@@ -1885,25 +2166,31 @@ var searchShape = {
   listen_count_max: z.number().optional(),
   listened_within_days: z.number().optional(),
   not_listened_within_days: z.number().optional(),
-  hour_of_day: z.number().int().min(0).max(23).optional().describe("Only tracks he has actually listened to at this local hour."),
+  hour_of_day: z.number().int().min(0).max(23).optional().describe("Only tracks actually listened to at this local hour. Needs listen history."),
   day_of_week: z.number().int().min(0).max(6).optional().describe("0 = Sunday."),
   duration_min_sec: z.number().optional(),
   duration_max_sec: z.number().optional(),
   bpm_min: z.number().optional(),
   bpm_max: z.number().optional(),
   starred: z.boolean().optional(),
-  energy_min: z.number().optional().describe("Inferred mood axis 0-100: sleepy/still -> frantic."),
+  energy_min: z.number().optional().describe("Inferred mood axis 0-100: still -> frantic."),
   energy_max: z.number().optional(),
-  valence_min: z.number().optional().describe("0-100: bleak/melancholy -> bright/joyful."),
+  valence_min: z.number().optional().describe("0-100: bleak -> joyful."),
   valence_max: z.number().optional(),
   intensity_min: z.number().optional().describe("0-100: gentle -> heavy/aggressive."),
   intensity_max: z.number().optional(),
-  organic_min: z.number().optional().describe("0-100: fully electronic -> fully acoustic."),
-  organic_max: z.number().optional(),
-  moods: z.array(z.string()).optional().describe("Inferred feeling descriptors, e.g. ['hazy','wistful','anthemic']. Any-of, substring."),
+  acousticness_min: z.number().optional().describe("0-100: fully electronic -> fully acoustic."),
+  acousticness_max: z.number().optional(),
+  density_min: z.number().optional().describe("0-100: sparse/solo -> wall of sound."),
+  density_max: z.number().optional(),
+  tempo_feel: z.array(z.enum(TEMPO_FEELS)).optional().describe("How fast the track feels, any-of. Independent of energy: a ballad can be intense."),
+  vocal: z.array(z.enum(VOCAL_KINDS)).optional().describe("Any-of. Use ['instrumental'] for focus lists."),
+  moods: z.array(z.string()).optional().describe(
+    `Any-of match on the controlled vocabulary: ${MOOD_VOCABULARY.join(", ")}. Common synonyms are folded automatically (e.g. 'chill' -> 'mellow', 'angry' -> 'furious').`
+  ),
   exclude_moods: z.array(z.string()).optional(),
   mood_vibes: z.array(z.string()).optional().describe(
-    "Tracks that READ AS one of his curated vibes, whether or not they are filed on that playlist. Matches hand-curated membership, the mood pass, and tag-similarity predictions \u2014 so it reaches the whole library, not just the ~3,800 playlisted tracks. Prefer this over `vibes` for any mood request."
+    `Named regions of mood-space, any-of: ${VIBE_NAMES.join(", ")}. Membership is computed from a track's mood coordinates, so this covers every labelled track in the library. Prefer this over \`vibes\` for any mood request.`
   ),
   fits_time: z.string().optional().describe("One of: early morning, morning, midday, afternoon, golden hour, evening, late night."),
   include_missing: z.boolean().optional().describe("Include tracks whose file is missing. Default false."),
@@ -1925,7 +2212,7 @@ var searchShape = {
     "duration_desc",
     "hour_fit",
     "title"
-  ]).optional().describe("Default 'affinity': a personal-fit blend of listens, plays, curated membership and recency."),
+  ]).optional().describe("Default 'affinity': a personal-fit blend of listens, plays, playlist membership and recency. Falls back gracefully where those signals are absent."),
   seed: z.number().int().optional().describe("Makes 'random'/'affinity' reproducible."),
   limit: z.number().int().min(1).max(500).optional(),
   offset: z.number().int().min(0).optional()
@@ -1934,7 +2221,7 @@ server.registerTool(
   "search_tracks",
   {
     title: "Search tracks with full compound filtering",
-    description: "The main query tool, over the WHOLE library. Every filter composes: real year/date ranges, play and listen recency, inferred mood axes (energy/valence/intensity/organic), mood descriptors, curated OR inferred vibe membership, Last.fm tags, duration, time-of-day fit, plus per-artist diversity caps and personal-affinity ranking.\n\nFor mood requests prefer `mood_vibes` / `moods` / the axis ranges over `vibes`: `vibes` matches only the ~3,800 tracks actually on a curated playlist, while the mood fields cover all 9,000+.",
+    description: "The main query tool, over the WHOLE library. Every filter composes: real year/date ranges, play and listen recency, the seven mood axes (energy, valence, intensity, acousticness, density, tempo_feel, vocal), mood descriptors, vibe regions, Last.fm tags, duration, time-of-day fit, plus per-artist diversity caps and personal-affinity ranking.\n\nFor mood requests use `mood_vibes` / `moods` / the axis ranges. `vibes` is a different thing: it matches only tracks filed onto a named playlist by hand, which many libraries have none of.\n\nThe mood filters need the labelling pass \u2014 check `mood_coverage` in describe_library before relying on them.",
     inputSchema: searchShape,
     annotations: { readOnlyHint: true }
   },
@@ -1950,22 +2237,30 @@ server.registerTool(
 server.registerTool(
   "get_vibe_profile",
   {
-    title: "Profile a curated mood playlist",
-    description: "What one of the user's own mood playlists actually consists of: top artists, genres, tags, era and tempo, when during the day he plays it, and representative tracks. Use this to ground an abstract mood request in what that word means in HIS library.",
+    title: "Profile a vibe region or playlist",
+    description: "What a vibe actually consists of IN THIS LIBRARY: top artists, genres, tags, era and tempo, where it sits in mood-space and how tightly it clusters, when during the day it gets played, and representative tracks. Use this to ground an abstract mood request in real music before searching.\n\nAccepts either a universal vibe region or, where the listener has them, a curated playlist name.",
     inputSchema: {
-      vibe: z.string().describe("Curated playlist name, e.g. 'golden hour'."),
+      vibe: z.string().describe(`A vibe region (${VIBE_NAMES.join(", ")}) or a curated playlist name.`),
       sample: z.number().int().min(0).max(50).optional().describe("Representative tracks to include. Default 12.")
     },
     annotations: { readOnlyHint: true }
   },
   tool(async ({ vibe, sample }) => {
-    const key = Object.keys(store.vibes).find((k) => norm(k) === norm(vibe));
-    if (!key) {
+    const region = VIBE_NAMES.find((k) => norm(k) === norm(vibe));
+    const playlist = Object.keys(store.vibes).find((k) => norm(k) === norm(vibe));
+    if (!region && !playlist) {
+      const known = [...VIBE_NAMES, ...Object.keys(store.vibes)].join(", ");
+      return result(`No vibe region or playlist named "${vibe}". Known: ${known}`);
+    }
+    const key = region ?? playlist;
+    const tracks = region ? store.tracks.filter((t) => t.moodVibes?.some((v) => v.vibe === region)) : store.vibes[playlist].map((id) => store.byId.get(id)).filter(Boolean);
+    if (!tracks.length) {
       return result(
-        `No curated playlist named "${vibe}". Available: ${Object.keys(store.vibes).join(", ")}`
+        region ? `No tracks fall in the "${key}" region yet. ${store.moodCoverage().labelled} of ${store.tracks.length} tracks are mood-labelled; run enrich_moods if that is zero.` : `Playlist "${key}" is empty.`
       );
     }
-    const tracks = store.vibes[key].map((id) => store.byId.get(id)).filter(Boolean);
+    const points = tracks.map((t) => t.mood).filter((m) => Boolean(m));
+    const centre = centroid(points);
     const count = (vals) => {
       const m = /* @__PURE__ */ new Map();
       for (const v of vals) m.set(v, (m.get(v) ?? 0) + 1);
@@ -1980,7 +2275,24 @@ server.registerTool(
       `"${key}": ${tracks.length} tracks, ${fmtDuration(tracks.reduce((a, t) => a + t.duration, 0))}.`,
       {
         vibe: key,
+        kind: region ? "vibe region" : "curated playlist",
+        gloss: region ? UNIVERSAL_VIBES[region].gloss : void 0,
         tracks: tracks.length,
+        // Where this library's take on the vibe actually sits, and how tightly
+        // it holds together -- a wide spread means the region is catching things
+        // that will not sequence well next to each other.
+        mood_centre: centre ? {
+          energy: Math.round(centre.energy),
+          valence: Math.round(centre.valence),
+          intensity: Math.round(centre.intensity),
+          acousticness: Math.round(centre.acousticness),
+          density: Math.round(centre.density),
+          tempo: centre.tempoFeel,
+          vocal: centre.vocal,
+          common_moods: centre.moods
+        } : null,
+        mood_spread: points.length > 1 ? Number(spreadRadius(points).toFixed(1)) : null,
+        mood_labelled: points.length,
         top_artists: count(tracks.map((t) => t.artist)).slice(0, 15).map(([artist, n]) => ({ artist, tracks: n })),
         genres: count(tracks.flatMap((t) => t.genres)).slice(0, 10).map(([genre, n]) => ({ genre, tracks: n })),
         tags: count(tracks.flatMap((t) => t.tags.slice(0, 6).map((x) => x.name))).slice(0, 20).map(([tag, n]) => ({ tag, tracks: n })),
@@ -2004,7 +2316,7 @@ server.registerTool(
   "similar_tracks",
   {
     title: "Find similar tracks in the library",
-    description: "Expand from seed tracks or artists. Combines Navidrome's agent-backed similarity (Last.fm/Deezer/ListenBrainz) with co-occurrence in the user's own curated playlists \u2014 tracks he himself repeatedly files alongside the seed. Results are restricted to what is actually in the library.",
+    description: "Expand from seed tracks or artists. Combines Navidrome's agent-backed similarity (Last.fm/Deezer/ListenBrainz) with co-occurrence in the listener's own playlists, where those exist \u2014 tracks repeatedly filed alongside the seed. Results are restricted to what is actually in the library.",
     inputSchema: {
       track_ids: z.array(z.string()).optional().describe("Seed track ids."),
       artists: z.array(z.string()).optional().describe("Seed artist names."),
@@ -2161,7 +2473,7 @@ server.registerTool(
   "list_playlists",
   {
     title: "List playlists",
-    description: "All playlists in Navidrome, including which are curated mood playlists and which are smart (self-updating).",
+    description: "All playlists in Navidrome, including which count as hand-curated taste signal and which are smart (self-updating).",
     inputSchema: {},
     annotations: { readOnlyHint: true }
   },
@@ -2175,7 +2487,7 @@ server.registerTool(
         duration: fmtDuration(p.duration ?? 0),
         smart: Boolean(p.rules),
         file_synced: Boolean(p.sync),
-        is_curated_vibe: Object.keys(store.vibes).includes(p.name),
+        hand_curated: Object.keys(store.vibes).includes(p.name),
         comment: p.comment || void 0,
         updated: p.updatedAt
       }))
@@ -2334,7 +2646,7 @@ server.registerTool(
   "daylist_context",
   {
     title: "Get daylist context for right now",
-    description: "Everything needed to generate this hour's daylist: local time and part of day, which of his curated moods he actually reaches for at this hour (measured as lift over that mood's own average, so it is not just playlist size), the artists/genres/tags that dominate this hour historically, what he has heard in the last few days, and the titles of recent daylists so the new one does not repeat them.",
+    description: "Everything needed to generate this hour's daylist: local time and part of day, which vibe regions fit this hour (measured as lift over each region's own average where listen history exists, falling back to the region's declared hours where it does not), the artists/genres/tags that dominate this hour historically, what has been heard in the last few days, and the titles of recent daylists so the new one does not repeat them.",
     inputSchema: {
       hour_of_day: z.number().int().min(0).max(23).optional().describe("Override the current hour."),
       recent_runs: z.number().int().optional().describe("How many past daylists to report. Default 8.")
@@ -2415,7 +2727,7 @@ server.registerTool(
   "enrich_moods",
   {
     title: "Label the library's moods",
-    description: "Run (or check) the one-time pass that gives EVERY track a mood: energy, valence, intensity, acoustic-vs-electronic, feeling descriptors, which curated vibe it reads as, and what times of day it fits.\n\nThis is what makes mood search work across the whole library rather than only the tracks already on a playlist. The library's own metadata cannot support it \u2014 genres are a few dozen coarse buckets, and BPM/ReplayGain/MusicBrainz IDs are present on under 3% of files. Results are cached permanently, so this normally runs once and then only picks up newly-added music.",
+    description: "Run (or check) the one-time pass that places EVERY track in mood-space: energy, valence, intensity, acousticness, density, how fast it feels, whether it is sung, which vocabulary terms describe it, and what times of day it fits.\n\nThis is the prerequisite for every mood filter, for vibe regions, and for cohesion \u2014 a library's own metadata cannot support them, since genres are a few dozen coarse buckets and BPM/ReplayGain/MusicBrainz IDs are present on under 3% of files. Results are cached permanently, so this normally runs once and then only picks up newly-added music.",
     inputSchema: {
       limit: z.number().int().optional().describe("Only label this many tracks (useful for a cheap trial run). Omit for all."),
       status_only: z.boolean().optional().describe("Just report coverage without starting a run."),
@@ -2459,7 +2771,7 @@ server.registerPrompt(
   "daylist",
   {
     title: "Generate this hour's daylist",
-    description: "Spotify-style daylist: read the hour's context, pick a mood grounded in his own playlists, source ~25 tracks that fit, name it in his voice, and publish it to the rolling daylist playlist.",
+    description: "Spotify-style daylist: read the hour's context, pick a vibe that fits it, source ~25 tracks that hold together, name it, and publish it to the rolling daylist playlist.",
     argsSchema: {
       length: z.string().optional().describe("Roughly how many tracks. Default 25."),
       steer: z.string().optional().describe("Optional nudge, e.g. 'keep it instrumental' or 'lean older'.")
@@ -2477,18 +2789,20 @@ server.registerPrompt(
             "",
             "Work in this order and do not skip steps:",
             "",
-            "1. Call `daylist_context`. Read the vibe_fit lift values, the hour_profile, and what I have",
-            "   heard in the last few days. Note the titles of recent daylists.",
+            "1. Call `daylist_context`. Read vibe_fit, the hour_profile, and what I have heard in the",
+            "   last few days. Note the titles of recent daylists.",
             "",
-            "2. Decide the mood for THIS hour. Anchor it on my own curated playlists \u2014 the names in",
-            "   vibe_fit are my vocabulary, not generic genres. Prefer a vibe with lift > 1 (I really do",
-            "   reach for it at this hour). If two are close, pick the one least used by the recent",
-            "   daylists. Use `get_vibe_profile` if you need to know what that mood actually sounds like.",
+            "2. Pick the vibe for THIS hour. Prefer one with lift > 1 \u2014 that is measured evidence I",
+            "   really do reach for it now. Where lift is null there is no history for that region, so",
+            "   fall back to `suits_hour`. If two are close, take the one the recent daylists have used",
+            "   least. Call `get_vibe_profile` to hear what that region actually contains here, and",
+            "   check its mood_spread: a wide one means you will have to narrow the search yourself.",
             "",
             "3. Source tracks with `search_tracks`. Requirements:",
-            "     - use `mood_vibes` (NOT `vibes`) so you draw on the whole library, not just the",
-            "       tracks already sitting on that playlist \u2014 plus the mood axes and `fits_time` to",
-            "       shape it. Fall back to `vibes` only if mood coverage is still low.",
+            "     - use `mood_vibes` with that region, plus the axis ranges and `fits_time` to shape it",
+            "     - keep the set coherent: narrow `tempo_feel` and `intensity` rather than taking",
+            "       whatever the region returns. Two tracks with the same mood word can still sound",
+            "       nothing alike, and the axes are what stop that",
             "     - pass `exclude_recent_daylists: 6` so this list is not a rerun",
             "     - pass `max_per_artist: 2` so it does not collapse onto one artist",
             "     - pass `hour_of_day` from the context and leave sort on `affinity`",
@@ -2498,7 +2812,8 @@ server.registerPrompt(
             "   week's rotation is boring.",
             "",
             "4. Sequence them deliberately: open with something that lands immediately, keep the energy",
-            "   coherent with the hour, avoid two songs by the same artist back to back.",
+            "   coherent with the hour, avoid two songs by the same artist back to back, and do not put",
+            "   a sparse acoustic track next to a dense loud one however well they match on mood.",
             "",
             "5. Name it the way Spotify names a daylist: lowercase, 2-4 words, concrete and a little",
             "   specific, evoking the time and feel rather than the genre \u2014 e.g. 'golden hour synth cruise',",
@@ -2507,7 +2822,7 @@ server.registerPrompt(
             "6. Publish with `commit_daylist`, passing the title, the ordered track_ids, and a one-line",
             "   description of why these tracks fit this hour.",
             "",
-            "Then tell me, briefly: the title, the mood you picked and why the data supported it, and",
+            "Then tell me, briefly: the title, the vibe you picked and why the data supported it, and",
             "3-4 highlights. Do not list every track."
           ].filter(Boolean).join("\n")
         }

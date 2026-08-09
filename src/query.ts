@@ -5,10 +5,18 @@
  * with every other, ranges are real ranges, and the result can be diversified and
  * ranked by a personal-affinity score built from play counts, listen history,
  * curated-playlist membership and time-of-day fit.
+ *
+ * Only the first of those is always present. Listen history, curated playlists
+ * and mood labels are each optional, and every filter that depends on one either
+ * degrades to a no-op or excludes cleanly rather than silently matching
+ * everything -- so the same query means the same thing in a library that has
+ * none of them.
  */
 
 import type { Store, Track } from "./store.js";
 import { norm } from "./listenbrainz.js";
+import type { TempoFeel, VocalKind } from "./moodspace.js";
+import { canonicalise } from "./vocabulary.js";
 
 export interface SearchParams {
   query?: string;
@@ -45,19 +53,22 @@ export interface SearchParams {
   bpm_min?: number;
   bpm_max?: number;
   starred?: boolean;
-  // Inferred mood axes (0-100), covering the whole library including tracks on
-  // no curated playlist. See mood.ts.
+  // Inferred mood axes (0-100), covering the whole library. See mood.ts.
   energy_min?: number;
   energy_max?: number;
   valence_min?: number;
   valence_max?: number;
   intensity_min?: number;
   intensity_max?: number;
-  organic_min?: number;
-  organic_max?: number;
+  acousticness_min?: number;
+  acousticness_max?: number;
+  density_min?: number;
+  density_max?: number;
+  tempo_feel?: TempoFeel[];
+  vocal?: VocalKind[];
   moods?: string[];
   exclude_moods?: string[];
-  /** Vibes the model inferred, whether or not the track is on that playlist. */
+  /** Universal vibe regions the track's mood falls inside. */
   mood_vibes?: string[];
   fits_time?: string;
   include_missing?: boolean;
@@ -110,6 +121,18 @@ function containsAny(hay: string, needles: string[]): boolean {
   return needles.some((n) => h.includes(norm(n)));
 }
 
+/**
+ * Fold requested descriptors onto the vocabulary, keeping anything unrecognised.
+ *
+ * A caller asking for "chill" means `mellow` and should get it. A caller asking
+ * for something off-vocabulary keeps their raw term so the substring match still
+ * has a chance -- dropping it would quietly widen the query instead of
+ * narrowing it, which is the failure mode that matters here.
+ */
+function wantedMoods(raw: string[]): string[] {
+  return raw.map((r) => canonicalise(r) ?? r.trim().toLowerCase());
+}
+
 export interface Scored {
   track: Track;
   score: number;
@@ -130,6 +153,8 @@ export function search(store: Store, p: SearchParams): { total: number; tracks: 
   );
   const releasedAfter = p.released_after ? Date.parse(p.released_after) : NaN;
   const releasedBefore = p.released_before ? Date.parse(p.released_before) : NaN;
+  const wantMoods = p.moods?.length ? wantedMoods(p.moods) : undefined;
+  const banMoods = p.exclude_moods?.length ? wantedMoods(p.exclude_moods) : undefined;
 
   const out: Track[] = [];
   for (const t of store.tracks) {
@@ -202,14 +227,12 @@ export function search(store: Store, p: SearchParams): { total: number; tracks: 
     if (p.bpm_max !== undefined && !(t.bpm && t.bpm <= p.bpm_max)) continue;
     if (p.starred !== undefined && t.starred !== p.starred) continue;
 
-    // Vibe matching across all three sources: hand-curated membership, the
-    // LLM mood pass, and tag-propagated guesses. Checked before the mood-axis
-    // block because propagation works with no mood labels at all -- that is the
-    // whole point of it.
+    // Vibe membership, computed from the track's mood coordinates. Curated
+    // playlists are unioned in where they happen to share a name with a region,
+    // so a listener who already files under "late night" keeps that filing.
     if (p.mood_vibes?.length) {
-      const guessed = (t.guessedVibes ?? []).map((g) => g.vibe);
-      const all = [...t.vibes, ...(t.mood?.vibes ?? []), ...guessed];
-      if (!anyMatch(all, p.mood_vibes)) continue;
+      const regions = (t.moodVibes ?? []).map((g) => g.vibe);
+      if (!anyMatch([...regions, ...t.vibes], p.mood_vibes)) continue;
     }
 
     // Mood-axis filters. A track with no mood yet cannot satisfy one, so it
@@ -219,7 +242,9 @@ export function search(store: Store, p: SearchParams): { total: number; tracks: 
       p.energy_min !== undefined || p.energy_max !== undefined ||
       p.valence_min !== undefined || p.valence_max !== undefined ||
       p.intensity_min !== undefined || p.intensity_max !== undefined ||
-      p.organic_min !== undefined || p.organic_max !== undefined ||
+      p.acousticness_min !== undefined || p.acousticness_max !== undefined ||
+      p.density_min !== undefined || p.density_max !== undefined ||
+      Boolean(p.tempo_feel?.length) || Boolean(p.vocal?.length) ||
       Boolean(p.moods?.length) || Boolean(p.fits_time);
     if (needsMood) {
       const m = t.mood;
@@ -230,18 +255,16 @@ export function search(store: Store, p: SearchParams): { total: number; tracks: 
       if (p.valence_max !== undefined && m.valence > p.valence_max) continue;
       if (p.intensity_min !== undefined && m.intensity < p.intensity_min) continue;
       if (p.intensity_max !== undefined && m.intensity > p.intensity_max) continue;
-      if (p.organic_min !== undefined && m.organic < p.organic_min) continue;
-      if (p.organic_max !== undefined && m.organic > p.organic_max) continue;
-      if (p.moods?.length) {
-        const want = p.moods.map((x) => x.toLowerCase());
-        if (!want.some((w) => m.moods.some((x) => x.includes(w)))) continue;
-      }
+      if (p.acousticness_min !== undefined && m.acousticness < p.acousticness_min) continue;
+      if (p.acousticness_max !== undefined && m.acousticness > p.acousticness_max) continue;
+      if (p.density_min !== undefined && m.density < p.density_min) continue;
+      if (p.density_max !== undefined && m.density > p.density_max) continue;
+      if (p.tempo_feel?.length && !p.tempo_feel.includes(m.tempoFeel)) continue;
+      if (p.vocal?.length && !p.vocal.includes(m.vocal)) continue;
+      if (wantMoods && !wantMoods.some((w) => m.moods.some((x) => x.includes(w)))) continue;
       if (p.fits_time && !m.times.some((x) => x.toLowerCase() === p.fits_time!.toLowerCase())) continue;
     }
-    if (p.exclude_moods?.length && t.mood) {
-      const bad = p.exclude_moods.map((x) => x.toLowerCase());
-      if (bad.some((w) => t.mood!.moods.some((x) => x.includes(w)))) continue;
-    }
+    if (banMoods && t.mood && banMoods.some((w) => t.mood!.moods.some((x) => x.includes(w)))) continue;
 
     out.push(t);
   }
@@ -260,14 +283,18 @@ export function search(store: Store, p: SearchParams): { total: number; tracks: 
  * Deliberately blends long-run evidence (lifetime listens, curated-playlist
  * membership) with short-run state (recency, so today's rotation does not repeat
  * yesterday's) and, when asked, time-of-day fit. Weights are heuristic; the point
- * is a stable ordering that surfaces things he demonstrably likes without
- * collapsing onto the same 40 tracks every time.
+ * is a stable ordering that surfaces demonstrated favourites without collapsing
+ * onto the same 40 tracks every time.
+ *
+ * Every term here is optional evidence that contributes zero when absent, so a
+ * library with no scrobbling and no playlists still gets a coherent ordering off
+ * play counts and ratings alone -- just a less personal one.
  */
 function affinity(t: Track, hour: number | undefined, nowSec: number): number {
   let s = 0;
   s += Math.log1p(t.listens) * 3; // lifetime evidence, compressed
   s += Math.log1p(t.playCount) * 1.5;
-  s += t.vibes.length * 2.5; // he put it on a mood playlist himself
+  s += t.vibes.length * 2.5; // filed onto a playlist by hand
   if (t.starred) s += 4;
   s += (t.rating || 0) * 1.5;
   if (hour !== undefined && t.hourHist.length && t.listens) {
@@ -374,12 +401,7 @@ export function brief(t: Track): Record<string, unknown> {
     plays: t.playCount || undefined,
     listens: t.listens || undefined,
     last_listened: t.lastListen ? new Date(t.lastListen * 1000).toISOString().slice(0, 10) : undefined,
-    vibes: t.vibes.length ? t.vibes : undefined,
-    reads_as: t.vibes.length
-      ? undefined
-      : t.guessedVibes?.length
-        ? t.guessedVibes.map((g) => `${g.vibe} (${g.score})`)
-        : undefined,
+    playlists: t.vibes.length ? t.vibes : undefined,
     tags: t.tags.length ? t.tags.slice(0, 6).map((x) => x.name) : undefined,
     starred: t.starred || undefined,
     mood: t.mood
@@ -387,10 +409,13 @@ export function brief(t: Track): Record<string, unknown> {
           energy: t.mood.energy,
           valence: t.mood.valence,
           intensity: t.mood.intensity,
-          organic: t.mood.organic,
+          acousticness: t.mood.acousticness,
+          density: t.mood.density,
+          tempo: t.mood.tempoFeel,
+          vocal: t.mood.vocal,
           moods: t.mood.moods,
           fits: t.mood.times,
-          reads_as: t.mood.vibes.length ? t.mood.vibes : undefined,
+          vibes: t.moodVibes?.length ? t.moodVibes.map((v) => v.vibe) : undefined,
         }
       : undefined,
   };

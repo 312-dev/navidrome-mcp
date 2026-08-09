@@ -2,12 +2,17 @@
 /**
  * Navidrome MCP server.
  *
- * Mood- and vibe-aware playlist generation over a personal Navidrome library,
- * grounded in three sources that each cover the others' blind spots:
+ * Mood- and vibe-aware playlist generation over any Navidrome library, grounded
+ * in sources that each cover the others' blind spots:
  *
  *   Navidrome  - authoritative metadata + the playlist write path
+ *   mood pass  - where every track sits in mood-space (see mood.ts)
  *   ListenBrainz - timestamped listen history (Navidrome keeps only a last-played)
  *   Last.fm    - descriptive tag vocabulary (the library's own genres are coarse)
+ *
+ * Only the first two are required. The listener's own playlists, their listen
+ * history and Last.fm tags are optional enrichment: each improves ranking and
+ * time-of-day fit where it exists, and none is load-bearing.
  *
  * Speaks MCP over stdio; the gateway wraps it with mcp-proxy to serve Streamable
  * HTTP behind the OAuth worker.
@@ -22,6 +27,8 @@ import { Navidrome } from "./navidrome.js";
 import { brief, search, type SearchParams, type SortKey } from "./query.js";
 import { Store, type Track } from "./store.js";
 import { norm } from "./listenbrainz.js";
+import { centroid, spreadRadius, TEMPO_FEELS, VOCAL_KINDS } from "./moodspace.js";
+import { MOOD_VOCABULARY, UNIVERSAL_VIBES, VIBE_NAMES } from "./vocabulary.js";
 
 // ── config ──────────────────────────────────────────────────────────────────
 
@@ -114,20 +121,23 @@ server.registerTool(
   {
     title: "Describe the music library",
     description:
-      "Orientation for the whole library: size, genre and decade distribution, the user's own curated mood playlists (his personal vibe vocabulary), the Last.fm tag vocabulary available for filtering, and listening-history coverage. Call this FIRST when you need to build a playlist and do not yet know what the library contains.",
+      "Orientation for the whole library: size, genre and decade distribution, how the library spreads across the universal mood regions, the Last.fm tag vocabulary available for filtering, and how much listening history and mood labelling exist to work with. Call this FIRST when you need to build a playlist and do not yet know what the library contains.",
     inputSchema: {},
     annotations: { readOnlyHint: true },
   },
   tool(async () => {
     const totalSec = store.tracks.reduce((a, t) => a + t.duration, 0);
     const withListens = store.tracks.filter((t) => t.listens > 0).length;
-    const vibes = Object.entries(store.vibes)
-      .map(([name, ids]) => ({ vibe: name, tracks: ids.length }))
+    const playlists = Object.entries(store.vibes)
+      .map(([name, ids]) => ({ playlist: name, tracks: ids.length }))
       .sort((a, b) => b.tracks - a.tracks);
+    const coverage = store.moodCoverage();
+    const labelled = coverage.labelled;
+    const regionCounts = new Map(store.vibeHistogram().map((v) => [v.vibe, v.tracks]));
     return result(
       `Library: ${store.tracks.length} tracks, ${fmtDuration(totalSec)} total. ` +
-        `${vibes.length} curated mood playlists. ` +
-        `${store.listens.length} ListenBrainz listens on file (${withListens} tracks matched).`,
+        `${labelled} of ${store.tracks.length} mood-labelled. ` +
+        `${store.listens.length} listens on file (${withListens} tracks matched).`,
       {
         tracks: store.tracks.length,
         missing_files: store.tracks.filter((t) => t.missing).length,
@@ -135,7 +145,6 @@ server.registerTool(
         albums: new Set(store.tracks.map((t) => t.albumId)).size,
         total_duration: fmtDuration(totalSec),
         library_synced_at: new Date(store.syncedAt).toISOString(),
-        curated_vibes: vibes,
         genres: store.genreHistogram(),
         decades: store.decadeHistogram(),
         tag_vocabulary: store.tagVocabulary(80),
@@ -150,13 +159,19 @@ server.registerTool(
             : null,
         },
         tag_enrichment: store.enrichState,
-        mood_coverage: store.moodCoverage(),
-        vibe_propagation: store.propagation,
+        mood_coverage: coverage,
+        vibe_regions: Object.entries(UNIVERSAL_VIBES).map(([vibe, d]) => ({
+          vibe,
+          gloss: d.gloss,
+          tracks: regionCounts.get(vibe) ?? 0,
+        })),
         mood_vocabulary: store.moodVocabulary(60),
+        curated_playlists: playlists.length ? playlists : undefined,
         note:
-          "The whole library is a favourites sync, so every track here is already something he liked. " +
-          "Selection is about fit for the moment, not about whether he likes it. " +
-          "Use `mood_vibes` to reach the whole library: it matches hand-curated membership PLUS tracks predicted to belong by tag similarity to his own playlists (measured 63% top-1 / 85% top-2 on a holdout). Plain `vibes` matches only the ~3,800 tracks he filed by hand. The numeric mood axes need the mood pass, which is separate.",
+          labelled === 0
+            ? "No tracks are mood-labelled yet, so the mood axes, `mood_vibes` and `fits_time` will match nothing. Run `enrich_moods` first, or fall back to genres, tags and listening history."
+            : "Vibe regions are fixed definitions in mood-space, not this library's playlists, so `mood_vibes` means the same thing everywhere. `vibes` is different: it matches only tracks the listener filed onto a playlist by hand, which most libraries have little or none of." +
+              (playlists.length ? "" : " This library has no curated playlists, so `vibes` will match nothing."),
       },
     );
   }),
@@ -177,7 +192,9 @@ const searchShape = {
   vibes: z
     .array(z.string())
     .optional()
-    .describe("Restrict to tracks on these curated playlists, e.g. ['golden hour','textured']."),
+    .describe(
+      "Restrict to tracks the listener filed onto these named playlists by hand. Most libraries have few or none — prefer `mood_vibes`.",
+    ),
   exclude_vibes: z.array(z.string()).optional(),
   year_min: z.number().int().optional(),
   year_max: z.number().int().optional(),
@@ -201,31 +218,40 @@ const searchShape = {
     .min(0)
     .max(23)
     .optional()
-    .describe("Only tracks he has actually listened to at this local hour."),
+    .describe("Only tracks actually listened to at this local hour. Needs listen history."),
   day_of_week: z.number().int().min(0).max(6).optional().describe("0 = Sunday."),
   duration_min_sec: z.number().optional(),
   duration_max_sec: z.number().optional(),
   bpm_min: z.number().optional(),
   bpm_max: z.number().optional(),
   starred: z.boolean().optional(),
-  energy_min: z.number().optional().describe("Inferred mood axis 0-100: sleepy/still -> frantic."),
+  energy_min: z.number().optional().describe("Inferred mood axis 0-100: still -> frantic."),
   energy_max: z.number().optional(),
-  valence_min: z.number().optional().describe("0-100: bleak/melancholy -> bright/joyful."),
+  valence_min: z.number().optional().describe("0-100: bleak -> joyful."),
   valence_max: z.number().optional(),
   intensity_min: z.number().optional().describe("0-100: gentle -> heavy/aggressive."),
   intensity_max: z.number().optional(),
-  organic_min: z.number().optional().describe("0-100: fully electronic -> fully acoustic."),
-  organic_max: z.number().optional(),
+  acousticness_min: z.number().optional().describe("0-100: fully electronic -> fully acoustic."),
+  acousticness_max: z.number().optional(),
+  density_min: z.number().optional().describe("0-100: sparse/solo -> wall of sound."),
+  density_max: z.number().optional(),
+  tempo_feel: z
+    .array(z.enum(TEMPO_FEELS))
+    .optional()
+    .describe("How fast the track feels, any-of. Independent of energy: a ballad can be intense."),
+  vocal: z.array(z.enum(VOCAL_KINDS)).optional().describe("Any-of. Use ['instrumental'] for focus lists."),
   moods: z
     .array(z.string())
     .optional()
-    .describe("Inferred feeling descriptors, e.g. ['hazy','wistful','anthemic']. Any-of, substring."),
+    .describe(
+      `Any-of match on the controlled vocabulary: ${MOOD_VOCABULARY.join(", ")}. Common synonyms are folded automatically (e.g. 'chill' -> 'mellow', 'angry' -> 'furious').`,
+    ),
   exclude_moods: z.array(z.string()).optional(),
   mood_vibes: z
     .array(z.string())
     .optional()
     .describe(
-      "Tracks that READ AS one of his curated vibes, whether or not they are filed on that playlist. Matches hand-curated membership, the mood pass, and tag-similarity predictions — so it reaches the whole library, not just the ~3,800 playlisted tracks. Prefer this over `vibes` for any mood request.",
+      `Named regions of mood-space, any-of: ${VIBE_NAMES.join(", ")}. Membership is computed from a track's mood coordinates, so this covers every labelled track in the library. Prefer this over \`vibes\` for any mood request.`,
     ),
   fits_time: z
     .string()
@@ -257,7 +283,7 @@ const searchShape = {
       "title",
     ])
     .optional()
-    .describe("Default 'affinity': a personal-fit blend of listens, plays, curated membership and recency."),
+    .describe("Default 'affinity': a personal-fit blend of listens, plays, playlist membership and recency. Falls back gracefully where those signals are absent."),
   seed: z.number().int().optional().describe("Makes 'random'/'affinity' reproducible."),
   limit: z.number().int().min(1).max(500).optional(),
   offset: z.number().int().min(0).optional(),
@@ -268,8 +294,9 @@ server.registerTool(
   {
     title: "Search tracks with full compound filtering",
     description:
-      "The main query tool, over the WHOLE library. Every filter composes: real year/date ranges, play and listen recency, inferred mood axes (energy/valence/intensity/organic), mood descriptors, curated OR inferred vibe membership, Last.fm tags, duration, time-of-day fit, plus per-artist diversity caps and personal-affinity ranking.\n\n" +
-      "For mood requests prefer `mood_vibes` / `moods` / the axis ranges over `vibes`: `vibes` matches only the ~3,800 tracks actually on a curated playlist, while the mood fields cover all 9,000+.",
+      "The main query tool, over the WHOLE library. Every filter composes: real year/date ranges, play and listen recency, the seven mood axes (energy, valence, intensity, acousticness, density, tempo_feel, vocal), mood descriptors, vibe regions, Last.fm tags, duration, time-of-day fit, plus per-artist diversity caps and personal-affinity ranking.\n\n" +
+      "For mood requests use `mood_vibes` / `moods` / the axis ranges. `vibes` is a different thing: it matches only tracks filed onto a named playlist by hand, which many libraries have none of.\n\n" +
+      "The mood filters need the labelling pass — check `mood_coverage` in describe_library before relying on them.",
     inputSchema: searchShape,
     annotations: { readOnlyHint: true },
   },
@@ -288,23 +315,40 @@ server.registerTool(
 server.registerTool(
   "get_vibe_profile",
   {
-    title: "Profile a curated mood playlist",
+    title: "Profile a vibe region or playlist",
     description:
-      "What one of the user's own mood playlists actually consists of: top artists, genres, tags, era and tempo, when during the day he plays it, and representative tracks. Use this to ground an abstract mood request in what that word means in HIS library.",
+      "What a vibe actually consists of IN THIS LIBRARY: top artists, genres, tags, era and tempo, where it sits in mood-space and how tightly it clusters, when during the day it gets played, and representative tracks. Use this to ground an abstract mood request in real music before searching.\n\n" +
+      "Accepts either a universal vibe region or, where the listener has them, a curated playlist name.",
     inputSchema: {
-      vibe: z.string().describe("Curated playlist name, e.g. 'golden hour'."),
+      vibe: z
+        .string()
+        .describe(`A vibe region (${VIBE_NAMES.join(", ")}) or a curated playlist name.`),
       sample: z.number().int().min(0).max(50).optional().describe("Representative tracks to include. Default 12."),
     },
     annotations: { readOnlyHint: true },
   },
   tool(async ({ vibe, sample }: { vibe: string; sample?: number }) => {
-    const key = Object.keys(store.vibes).find((k) => norm(k) === norm(vibe));
-    if (!key) {
+    // A region wins over a playlist of the same name: it is defined the same way
+    // in every install, so resolving it first keeps the tool's answer stable.
+    const region = VIBE_NAMES.find((k) => norm(k) === norm(vibe));
+    const playlist = Object.keys(store.vibes).find((k) => norm(k) === norm(vibe));
+    if (!region && !playlist) {
+      const known = [...VIBE_NAMES, ...Object.keys(store.vibes)].join(", ");
+      return result(`No vibe region or playlist named "${vibe}". Known: ${known}`);
+    }
+    const key = region ?? playlist!;
+    const tracks = region
+      ? store.tracks.filter((t) => t.moodVibes?.some((v) => v.vibe === region))
+      : (store.vibes[playlist!]!.map((id) => store.byId.get(id)).filter(Boolean) as Track[]);
+    if (!tracks.length) {
       return result(
-        `No curated playlist named "${vibe}". Available: ${Object.keys(store.vibes).join(", ")}`,
+        region
+          ? `No tracks fall in the "${key}" region yet. ${store.moodCoverage().labelled} of ${store.tracks.length} tracks are mood-labelled; run enrich_moods if that is zero.`
+          : `Playlist "${key}" is empty.`,
       );
     }
-    const tracks = store.vibes[key]!.map((id) => store.byId.get(id)).filter(Boolean) as Track[];
+    const points = tracks.map((t) => t.mood).filter((m): m is NonNullable<typeof m> => Boolean(m));
+    const centre = centroid(points);
     const count = <T extends string>(vals: T[]) => {
       const m = new Map<string, number>();
       for (const v of vals) m.set(v, (m.get(v) ?? 0) + 1);
@@ -320,7 +364,26 @@ server.registerTool(
       `"${key}": ${tracks.length} tracks, ${fmtDuration(tracks.reduce((a, t) => a + t.duration, 0))}.`,
       {
         vibe: key,
+        kind: region ? "vibe region" : "curated playlist",
+        gloss: region ? UNIVERSAL_VIBES[region]!.gloss : undefined,
         tracks: tracks.length,
+        // Where this library's take on the vibe actually sits, and how tightly
+        // it holds together -- a wide spread means the region is catching things
+        // that will not sequence well next to each other.
+        mood_centre: centre
+          ? {
+              energy: Math.round(centre.energy),
+              valence: Math.round(centre.valence),
+              intensity: Math.round(centre.intensity),
+              acousticness: Math.round(centre.acousticness),
+              density: Math.round(centre.density),
+              tempo: centre.tempoFeel,
+              vocal: centre.vocal,
+              common_moods: centre.moods,
+            }
+          : null,
+        mood_spread: points.length > 1 ? Number(spreadRadius(points).toFixed(1)) : null,
+        mood_labelled: points.length,
         top_artists: count(tracks.map((t) => t.artist)).slice(0, 15).map(([artist, n]) => ({ artist, tracks: n })),
         genres: count(tracks.flatMap((t) => t.genres)).slice(0, 10).map(([genre, n]) => ({ genre, tracks: n })),
         tags: count(tracks.flatMap((t) => t.tags.slice(0, 6).map((x) => x.name)))
@@ -356,7 +419,7 @@ server.registerTool(
   {
     title: "Find similar tracks in the library",
     description:
-      "Expand from seed tracks or artists. Combines Navidrome's agent-backed similarity (Last.fm/Deezer/ListenBrainz) with co-occurrence in the user's own curated playlists — tracks he himself repeatedly files alongside the seed. Results are restricted to what is actually in the library.",
+      "Expand from seed tracks or artists. Combines Navidrome's agent-backed similarity (Last.fm/Deezer/ListenBrainz) with co-occurrence in the listener's own playlists, where those exist — tracks repeatedly filed alongside the seed. Results are restricted to what is actually in the library.",
     inputSchema: {
       track_ids: z.array(z.string()).optional().describe("Seed track ids."),
       artists: z.array(z.string()).optional().describe("Seed artist names."),
@@ -387,8 +450,10 @@ server.registerTool(
       const scores = new Map<string, number>();
       const bump = (id: string, w: number) => scores.set(id, (scores.get(id) ?? 0) + w);
 
-      // 1. Co-occurrence in his own curated playlists. Strongest personal signal:
-      //    these are pairings he made himself, not a global popularity graph.
+      // 1. Co-occurrence in hand-made playlists. The strongest personal signal
+      //    when it is there -- these are pairings the listener made, not a
+      //    global popularity graph -- and simply contributes nothing when it is
+      //    not, leaving the agent-backed sources to answer alone.
       const seedIds = new Set(seeds.map((t) => t.id));
       for (const ids of Object.values(store.vibes)) {
         const set = new Set(ids);
@@ -551,7 +616,7 @@ server.registerTool(
   "list_playlists",
   {
     title: "List playlists",
-    description: "All playlists in Navidrome, including which are curated mood playlists and which are smart (self-updating).",
+    description: "All playlists in Navidrome, including which count as hand-curated taste signal and which are smart (self-updating).",
     inputSchema: {},
     annotations: { readOnlyHint: true },
   },
@@ -565,7 +630,7 @@ server.registerTool(
         duration: fmtDuration(p.duration ?? 0),
         smart: Boolean(p.rules),
         file_synced: Boolean(p.sync),
-        is_curated_vibe: Object.keys(store.vibes).includes(p.name),
+        hand_curated: Object.keys(store.vibes).includes(p.name),
         comment: p.comment || undefined,
         updated: p.updatedAt,
       })),
@@ -756,7 +821,7 @@ server.registerTool(
   {
     title: "Get daylist context for right now",
     description:
-      "Everything needed to generate this hour's daylist: local time and part of day, which of his curated moods he actually reaches for at this hour (measured as lift over that mood's own average, so it is not just playlist size), the artists/genres/tags that dominate this hour historically, what he has heard in the last few days, and the titles of recent daylists so the new one does not repeat them.",
+      "Everything needed to generate this hour's daylist: local time and part of day, which vibe regions fit this hour (measured as lift over each region's own average where listen history exists, falling back to the region's declared hours where it does not), the artists/genres/tags that dominate this hour historically, what has been heard in the last few days, and the titles of recent daylists so the new one does not repeat them.",
     inputSchema: {
       hour_of_day: z.number().int().min(0).max(23).optional().describe("Override the current hour."),
       recent_runs: z.number().int().optional().describe("How many past daylists to report. Default 8."),
@@ -855,8 +920,8 @@ server.registerTool(
   {
     title: "Label the library's moods",
     description:
-      "Run (or check) the one-time pass that gives EVERY track a mood: energy, valence, intensity, acoustic-vs-electronic, feeling descriptors, which curated vibe it reads as, and what times of day it fits.\n\n" +
-      "This is what makes mood search work across the whole library rather than only the tracks already on a playlist. The library's own metadata cannot support it — genres are a few dozen coarse buckets, and BPM/ReplayGain/MusicBrainz IDs are present on under 3% of files. Results are cached permanently, so this normally runs once and then only picks up newly-added music.",
+      "Run (or check) the one-time pass that places EVERY track in mood-space: energy, valence, intensity, acousticness, density, how fast it feels, whether it is sung, which vocabulary terms describe it, and what times of day it fits.\n\n" +
+      "This is the prerequisite for every mood filter, for vibe regions, and for cohesion — a library's own metadata cannot support them, since genres are a few dozen coarse buckets and BPM/ReplayGain/MusicBrainz IDs are present on under 3% of files. Results are cached permanently, so this normally runs once and then only picks up newly-added music.",
     inputSchema: {
       limit: z
         .number()
@@ -917,7 +982,7 @@ server.registerPrompt(
   {
     title: "Generate this hour's daylist",
     description:
-      "Spotify-style daylist: read the hour's context, pick a mood grounded in his own playlists, source ~25 tracks that fit, name it in his voice, and publish it to the rolling daylist playlist.",
+      "Spotify-style daylist: read the hour's context, pick a vibe that fits it, source ~25 tracks that hold together, name it, and publish it to the rolling daylist playlist.",
     argsSchema: {
       length: z.string().optional().describe("Roughly how many tracks. Default 25."),
       steer: z.string().optional().describe("Optional nudge, e.g. 'keep it instrumental' or 'lean older'."),
@@ -935,18 +1000,20 @@ server.registerPrompt(
             "",
             "Work in this order and do not skip steps:",
             "",
-            "1. Call `daylist_context`. Read the vibe_fit lift values, the hour_profile, and what I have",
-            "   heard in the last few days. Note the titles of recent daylists.",
+            "1. Call `daylist_context`. Read vibe_fit, the hour_profile, and what I have heard in the",
+            "   last few days. Note the titles of recent daylists.",
             "",
-            "2. Decide the mood for THIS hour. Anchor it on my own curated playlists — the names in",
-            "   vibe_fit are my vocabulary, not generic genres. Prefer a vibe with lift > 1 (I really do",
-            "   reach for it at this hour). If two are close, pick the one least used by the recent",
-            "   daylists. Use `get_vibe_profile` if you need to know what that mood actually sounds like.",
+            "2. Pick the vibe for THIS hour. Prefer one with lift > 1 — that is measured evidence I",
+            "   really do reach for it now. Where lift is null there is no history for that region, so",
+            "   fall back to `suits_hour`. If two are close, take the one the recent daylists have used",
+            "   least. Call `get_vibe_profile` to hear what that region actually contains here, and",
+            "   check its mood_spread: a wide one means you will have to narrow the search yourself.",
             "",
             "3. Source tracks with `search_tracks`. Requirements:",
-            "     - use `mood_vibes` (NOT `vibes`) so you draw on the whole library, not just the",
-            "       tracks already sitting on that playlist — plus the mood axes and `fits_time` to",
-            "       shape it. Fall back to `vibes` only if mood coverage is still low.",
+            "     - use `mood_vibes` with that region, plus the axis ranges and `fits_time` to shape it",
+            "     - keep the set coherent: narrow `tempo_feel` and `intensity` rather than taking",
+            "       whatever the region returns. Two tracks with the same mood word can still sound",
+            "       nothing alike, and the axes are what stop that",
             "     - pass `exclude_recent_daylists: 6` so this list is not a rerun",
             "     - pass `max_per_artist: 2` so it does not collapse onto one artist",
             "     - pass `hour_of_day` from the context and leave sort on `affinity`",
@@ -956,7 +1023,8 @@ server.registerPrompt(
             "   week's rotation is boring.",
             "",
             "4. Sequence them deliberately: open with something that lands immediately, keep the energy",
-            "   coherent with the hour, avoid two songs by the same artist back to back.",
+            "   coherent with the hour, avoid two songs by the same artist back to back, and do not put",
+            "   a sparse acoustic track next to a dense loud one however well they match on mood.",
             "",
             "5. Name it the way Spotify names a daylist: lowercase, 2-4 words, concrete and a little",
             "   specific, evoking the time and feel rather than the genre — e.g. 'golden hour synth cruise',",
@@ -965,7 +1033,7 @@ server.registerPrompt(
             "6. Publish with `commit_daylist`, passing the title, the ordered track_ids, and a one-line",
             "   description of why these tracks fit this hour.",
             "",
-            "Then tell me, briefly: the title, the mood you picked and why the data supported it, and",
+            "Then tell me, briefly: the title, the vibe you picked and why the data supported it, and",
             "3-4 highlights. Do not list every track.",
           ]
             .filter(Boolean)

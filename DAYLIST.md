@@ -28,15 +28,17 @@ Generate my Navidrome daylist for right now.
 1. Call daylist_context. Read the vibe_fit lift values, the hour_profile, and what
    I have heard in the last few days. Note the recent daylist titles.
 
-2. Pick the mood for THIS hour, anchored on my own curated playlists — the names in
-   vibe_fit are my vocabulary, not generic genres. Prefer a vibe with lift > 1. If
-   two are close, pick whichever the recent daylists used least.
+2. Pick the vibe for THIS hour. Prefer one with lift > 1 — measured evidence I
+   reach for it now. Where lift is null there is no history for that region, so
+   fall back to suits_hour. If two are close, take whichever the recent daylists
+   used least. get_vibe_profile shows what it holds here, and its mood_spread
+   warns you when the region is too loose to use as-is.
 
 3. Source ~25 tracks with search_tracks. Use the mood fields, NOT `vibes`:
-     - mood_vibes: ["<the vibe you picked>"]   ← reaches the whole library
+     - mood_vibes: ["<the vibe you picked>"]
      - fits_time: "<from the context: morning / golden hour / late night / ...>"
-     - shape it with the axes, e.g. energy_min/energy_max, valence_min,
-       intensity_max, organic_min — these cover all ~9,200 labelled tracks
+     - narrow it with the axes — tempo_feel and intensity above all, since two
+       tracks sharing a mood word can still sound nothing alike
      - exclude_recent_daylists: 6     (so this is not a rerun)
      - max_per_artist: 2              (so it doesn't collapse onto one artist)
      - hour_of_day from the context, sort left on "affinity"
@@ -46,8 +48,8 @@ Generate my Navidrome daylist for right now.
    (not_listened_within_days: 180) or recently added (added_within_days: 60).
 
 4. Sequence them: strong opener, energy coherent with the hour, never two songs by
-   the same artist back to back. Watch the energy/valence numbers so the list has a
-   shape rather than lurching.
+   the same artist back to back, and never a sparse acoustic track next to a dense
+   loud one however well they match on mood.
 
 5. Name it like Spotify names a daylist — lowercase, 2-4 words, concrete and
    evocative of the time and feel rather than the genre. Do not reuse a recent title.
@@ -65,23 +67,18 @@ can invoke that instead of pasting the above.
 
 The generator does not guess what "6pm on a Thursday" sounds like. It measures it.
 
-**`daylist_context`** reports, for the current hour, which of *your own* curated playlists
-you actually reach for — scored as **lift**, not raw count. Lift asks "does this mood
-appear more than its own average at this hour?" Raw counts would just rank playlists by
-size, and `bedtime` (718 tracks) would win every hour.
+**`daylist_context`** reports, for the current hour, which vibe regions you actually reach
+for — scored as **lift**, not raw count. Lift asks "does this region appear more than its
+own average at this hour?" Raw counts would just rank regions by size, and the biggest one
+would win every hour.
 
-A real example, Tuesday midday: `hype mode` 2.01, `good vibes` 1.86, `cranked` 1.77 —
-while `bedtime`, the largest playlist, does not place at all.
+Where a region has no listen history behind it, lift is `null` and its declared `hours`
+stand in, so an install with no scrobbling connected still gets a sensible answer on day
+one rather than an empty ranking.
 
-**`search_tracks`** then sources candidates. The `mood_vibes` field is the important one:
-it matches hand-curated membership *plus* tracks the mood pass placed in that vibe *plus*
-tag-similarity predictions. Measured reach on this library:
-
-| Vibe | Filed by hand | Reachable via `mood_vibes` |
-|---|---|---|
-| `bedtime` | 551 | **2,783** (5.1×) |
-| `cranked` | 606 | **1,761** (2.9×) |
-| `golden hour` | 230 | **2,714** (11.8×) |
+**`search_tracks`** then sources candidates. `mood_vibes` is the important field: membership
+is computed from each track's mood coordinates, so it covers every labelled track rather
+than only the ones you filed onto a playlist by hand.
 
 **`commit_daylist`** publishes and records the run, which is what makes the rotation guard
 work on the next pass.
@@ -94,10 +91,13 @@ work on the next pass.
 | More variety within a list | Lower `max_per_artist` to 1 |
 | Calmer | `energy_max: 45`, `intensity_max: 40` |
 | More driving | `energy_min: 70` |
-| More acoustic | `organic_min: 65` |
-| More electronic | `organic_max: 30` |
+| More acoustic | `acousticness_min: 65` |
+| More electronic | `acousticness_max: 30` |
 | Brighter | `valence_min: 65` |
 | Moodier | `valence_max: 40` |
+| Sparser | `density_max: 35` |
+| Instrumental only | `vocal: ["instrumental"]` |
+| Tighter flow | Narrow `tempo_feel`, e.g. `["slow","mid"]` |
 | More discovery | Raise `not_listened_within_days`, or add `added_within_days: 60` |
 | Longer sets | Ask for 40 tracks; ~25 is about 90 minutes |
 | A different clock | Set `NAVIDROME_TZ` — all time-of-day analysis keys off it |

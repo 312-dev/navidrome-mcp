@@ -28,20 +28,28 @@ So this server maintains its own index and joins three sources:
 | ListenBrainz | Timestamped listen history — time-of-day and weekday habits |
 | Last.fm | A real descriptive tag vocabulary (`nu-disco`, `melancholy`, `shoegaze`) |
 
-It also treats **your existing curated playlists as your mood vocabulary**. If you have
-playlists called `golden hour`, `cranked` and `slow shreds`, those words already mean
-something specific in your library — far more than a generic genre ever will.
+Only the first is required. Listen history, Last.fm tags and your own playlists each improve
+ranking and time-of-day fit where they exist, and none of them is load-bearing — the same
+query means the same thing in a library that has none of them.
 
 ## The mood pass
 
-Those playlists cover maybe 40% of a library, so on their own they can only answer mood
-questions about tracks you already filed. A one-time enrichment pass closes that gap: every
-track gets **energy, valence, intensity, acoustic-vs-electronic, free-form descriptors, the
-curated vibe it reads as, and the times of day it fits**.
+A library's own metadata cannot answer a mood question: genres are a few dozen coarse
+buckets, and BPM, ReplayGain and MusicBrainz IDs are present on under 3% of files. So a
+one-time enrichment pass places every track in mood-space — **energy, valence, intensity,
+acousticness, density, how fast it feels, whether it is sung, two to four vocabulary terms,
+and the times of day it fits**. Results are cached permanently, so this runs once and
+afterwards only picks up new music.
 
-The inference is grounded in your own playlists — they're a hand-labelled training set in
-your own words — so unfiled tracks land in the same space as the ones you filed. Results
-are cached permanently, so this runs once and afterwards only picks up new music.
+The vocabulary is **defined, not derived**. Each of its 52 terms carries an explicit anchor
+in mood-space, and each of the 14 vibes is a named region with a centre and a radius, so the
+same track gets the same coordinates in anyone's library. Deriving the words from one
+collection instead would bake that collection's shape into them: a rock-heavy library yields
+`riffy` and `bass-heavy`, which say nothing useful about a jazz one.
+
+Words alone cannot carry cohesion, which is why the axes exist. Measured on a real library,
+`tender` covered both Debussy's *Suite bergamasque* and Metallica's *Nothing Else Matters* —
+both labels correct, and useless as a playlist filter. Distance in mood-space separates them.
 
 Cost stays small through three things: batching ~40 tracks per request, **prompt-caching the
 large identical taxonomy prefix** (the first batch runs alone, so the rest hit a warm cache
@@ -61,15 +69,18 @@ filters go dark.
 - **Navidrome's own compound engine is still exposed** via `create_smart_playlist`, for
   standing playlists that should keep re-evaluating server-side. Note those rules can
   only see Navidrome's own fields — not ListenBrainz listens or Last.fm tags.
+- **`npm run check:vocab`** asserts what typechecking cannot: that every region is
+  reachable, every synonym resolves, no region swallows more than 15% of mood-space, and
+  the Debussy/Metallica pair still land in different vibes.
 
 ## Tools
 
 | Tool | Purpose |
 |---|---|
-| `describe_library` | Orientation: size, genres, decades, curated vibes, tag vocabulary |
+| `describe_library` | Orientation: size, genres, decades, vibe regions, tag vocabulary |
 | `search_tracks` | The workhorse — full compound filtering, diversity caps, affinity ranking |
-| `get_vibe_profile` | What one of your curated moods actually consists of |
-| `similar_tracks` | Expand from seeds via agents + your own playlist co-occurrence |
+| `get_vibe_profile` | What a vibe actually consists of in *this* library, and how tightly it clusters |
+| `similar_tracks` | Expand from seeds via agents + playlist co-occurrence |
 | `listening_history` | recent / top / by_hour / by_weekday / rediscover / trending |
 | `list_playlists`, `get_playlist` | Read playlists |
 | `create_playlist`, `update_playlist`, `delete_playlist` | Write playlists |

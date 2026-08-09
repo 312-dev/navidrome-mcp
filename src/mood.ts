@@ -1,24 +1,23 @@
 /**
  * Full-library mood enrichment.
  *
- * The problem this solves: nothing in the library says how a track *feels*.
- * Genres are 32 coarse buckets with one covering ~47% of everything, BPM is
- * present on 0.3% of files, ReplayGain on 2%, and MusicBrainz recording IDs on
- * 2% -- which also rules out AcousticBrainz's audio-derived mood models as a
- * primary source (its data is keyed by MBID, and resolving the rest via ISRC ->
- * MusicBrainz is rate-limited to 1 req/s and would still only reach ~23% of the
- * library). Last.fm tags cover everything but describe genre and scene far more
- * than mood.
+ * The problem this solves: nothing in a music library says how a track *feels*.
+ * Genre tags are coarse and usually top-heavy (one genre covered 47% of the
+ * library this was built against), and the audio-derived alternatives are not
+ * reachable in practice -- AcousticBrainz's mood models are keyed by MusicBrainz
+ * recording ID, which under 3% of files carry, and resolving the rest via ISRC
+ * is rate-limited to 1 req/s. Last.fm tags cover everything but describe genre
+ * and scene far more than mood.
  *
  * So mood is inferred once, per track, and cached forever. The inference is
- * grounded in the strongest signal available: the user's own curated playlists.
- * Those playlists are a hand-labelled training set in his own vocabulary --
- * "golden hour", "cranked", "slow shreds" -- covering ~3,800 tracks. The pass
- * shows the model real examples from each and asks it to extend that vocabulary
- * to the whole library, so a track that never made it onto a playlist still gets
- * placed in the same space as the ones that did.
+ * grounded in the defined vocabulary in `vocabulary.ts`: every term the model
+ * may use carries an anchor in mood-space and a one-line gloss, so labelling is
+ * placement against fixed definitions rather than free association. That is what
+ * makes the output comparable across libraries -- and what lets a library with
+ * no playlists and no listening history be labelled just as well as one with
+ * years of both.
  *
- * Cost control comes from three places: batching ~50 tracks per request, prompt
+ * Cost control comes from three places: batching ~40 tracks per request, prompt
  * caching the (large, identical) taxonomy prefix across every request, and
  * running with thinking disabled at low effort -- this is classification, not
  * reasoning. The taxonomy prefix is what makes caching worth it: it is the
@@ -27,21 +26,21 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import type { Store, Track } from "./store.js";
+import { TEMPO_FEELS, VOCAL_KINDS, type MoodPoint } from "./moodspace.js";
+import { MOOD_ANCHORS, MOOD_VOCABULARY } from "./vocabulary.js";
 
-/** Where a track sits in mood-space. All axes 0-100. */
-export interface Mood {
-  /** Sleepy/still -> frantic. */
-  energy: number;
-  /** Bleak/melancholy -> bright/joyful. */
-  valence: number;
-  /** Gentle -> heavy/aggressive. */
-  intensity: number;
-  /** Fully electronic -> fully acoustic. */
-  organic: number;
-  /** 2-4 free-form descriptors, e.g. "hazy", "anthemic", "wistful". */
-  moods: string[];
-  /** Which of the user's own curated vibes this track belongs with (0-3). */
-  vibes: string[];
+/**
+ * Where a track sits in mood-space, plus when it fits.
+ *
+ * Extends `MoodPoint` so a labelled track is directly usable by the cohesion and
+ * sequencing engine with no conversion step.
+ *
+ * Note what is NOT here: which vibes the track belongs to. Vibe membership is
+ * computed from these coordinates (see `vibesFor`), not asked of the model --
+ * so it costs no tokens, cannot drift between batches, and updates for free if a
+ * region is ever redefined.
+ */
+export interface Mood extends MoodPoint {
   /** Times of day it fits. */
   times: string[];
 }
@@ -72,62 +71,79 @@ const CONCURRENCY = Number(process.env.MOOD_CONCURRENCY ?? 32) || 32;
  */
 const DEFAULT_MODEL = "claude-opus-5";
 
-function taxonomyPrompt(store: Store, vibeNames: string[]): string {
-  const lines: string[] = [];
-  lines.push(
-    "You are labelling a personal music library so it can be searched by mood.",
+/**
+ * The system prompt: a fixed taxonomy, identical for every library.
+ *
+ * Built once from the vocabulary module rather than from any library's contents.
+ * That is deliberate and it is the whole portability argument -- a prompt that
+ * showed the model examples from the listener's own playlists would teach it
+ * that collection's shape, so the same track would be labelled differently
+ * depending on whose library it sat in, and the labels would not be comparable.
+ *
+ * Every term is given with its coordinates AND its gloss, so the model has two
+ * consistent descriptions of the same region to place a track against.
+ */
+function taxonomyPrompt(): string {
+  const axis = (name: string, lo: string, hi: string) => `  ${name.padEnd(13)} 0-100  ${lo} -> ${hi}`;
+  const lines: string[] = [
+    "You are labelling a music library so it can be searched and sequenced by mood.",
     "",
-    "The listener has hand-curated playlists that ARE his mood vocabulary. Your job is to",
-    "extend that vocabulary to every track in his library, including tracks that never made",
-    "it onto one of these playlists. Judge each track on how it actually sounds and feels,",
-    "not on its genre label or its popularity.",
+    "Judge each track on how it actually SOUNDS, not on its genre label, its lyrics, its",
+    "reputation or its popularity. Two tracks with the same label should be usable one after",
+    "the other without the transition feeling wrong.",
     "",
-    "His curated vibes, with real examples of each:",
+    "## Axes",
     "",
-  );
+    axis("energy", "still and sleepy", "frantic activity"),
+    axis("valence", "bleak", "joyful"),
+    axis("intensity", "gentle", "heavy and aggressive"),
+    axis("acousticness", "fully electronic", "fully acoustic"),
+    axis("density", "sparse, one or two elements", "wall of sound"),
+    "",
+    `  tempoFeel     one of: ${TEMPO_FEELS.join(", ")}  (how fast it FEELS, not its BPM)`,
+    `  vocal         one of: ${VOCAL_KINDS.join(", ")}`,
+    "",
+    "Be decisive and use the full range -- clustering everything near 50 makes the labels",
+    "useless. `density` is about how much is happening at once: a solo voice is low even when",
+    "it is loud, a shoegaze wall is high even when it is calm.",
+    "",
+    "## Vocabulary",
+    "",
+    "Pick 2-4 `moods` from this list and nothing else. Each term is a fixed REGION of the",
+    "space above, given as its coordinates (E/V/I/A/D) and what it means. Choose the terms",
+    "whose regions your numbers actually land in -- the two should agree.",
+    "",
+  ];
 
-  for (const name of vibeNames) {
-    const ids = store.vibes[name] ?? [];
-    const tracks = ids
-      .map((id) => store.byId.get(id))
-      .filter((t): t is Track => Boolean(t));
-    // Sample across the playlist rather than taking the head: the first N
-    // entries of an m3u are usually one artist, which would teach the model that
-    // the vibe means that artist.
-    const step = Math.max(1, Math.floor(tracks.length / 18));
-    const sample = tracks.filter((_, i) => i % step === 0).slice(0, 18);
-    const genres = new Map<string, number>();
-    for (const t of tracks) for (const g of t.genres) genres.set(g, (genres.get(g) ?? 0) + 1);
-    const topGenres = [...genres.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([g]) => g)
-      .join(", ");
-    lines.push(
-      `## ${name}  (${tracks.length} tracks; mostly ${topGenres || "mixed"})`,
-      ...sample.map((t) => `  - ${t.artist} — ${t.title}${t.year ? ` (${t.year})` : ""}`),
-      "",
-    );
+  for (const [term, a] of Object.entries(MOOD_ANCHORS)) {
+    const coords = `E${a.energy} V${a.valence} I${a.intensity} A${a.acousticness} D${a.density}`;
+    lines.push(`  ${term.padEnd(12)} ${coords.padEnd(28)} ${a.gloss}`);
   }
 
   lines.push(
-    "For each track you are given, return:",
-    "  energy    0-100  sleepy and still -> frantic",
-    "  valence   0-100  bleak or melancholy -> bright and joyful",
-    "  intensity 0-100  gentle -> heavy and aggressive",
-    "  organic   0-100  fully electronic -> fully acoustic",
-    "  moods     2-4 short descriptors of the feeling (e.g. hazy, anthemic, wistful, menacing)",
-    `  vibes     0-3 of his curated vibe names, ONLY where the track genuinely belongs: ${vibeNames.join(", ")}`,
-    `  times     when it fits, from: ${TIME_SLOTS.join(", ")}`,
     "",
-    "Be decisive and use the full range of each axis -- clustering everything near 50 makes",
-    "the labels useless. Leave `vibes` empty rather than forcing a weak match. If you do not",
-    "recognise a track, infer from the artist and era rather than guessing at random.",
+    "## Times of day",
+    "",
+    `  times  when the track fits, from: ${TIME_SLOTS.join(", ")}`,
+    "",
+    "Judge this by the sound, not by habit: quiet and spacious suits late night, bright and",
+    "propulsive suits morning. Give every track at least one.",
+    "",
+    "## Notes",
+    "",
+    "Do not guess at random. If a track is unfamiliar, infer from the artist, the album and",
+    "the era -- an informed placement is far more useful than a hedged one at 50.",
     "Return one entry per track, preserving the given id exactly.",
   );
   return lines.join("\n");
 }
 
+/**
+ * `moods` is an enum of the whole vocabulary, so an off-list term is not a thing
+ * the model can return. `canonicalise` still exists for descriptors arriving from
+ * elsewhere -- the Navidrome plugin, or a user's own query -- but nothing written
+ * by this path needs folding after the fact.
+ */
 const SCHEMA = {
   type: "object",
   properties: {
@@ -137,27 +153,35 @@ const SCHEMA = {
         type: "object",
         properties: {
           id: { type: "string", description: "The track id exactly as given." },
-          energy: { type: "integer", description: "0-100, sleepy to frantic." },
+          energy: { type: "integer", description: "0-100, still to frantic." },
           valence: { type: "integer", description: "0-100, bleak to joyful." },
           intensity: { type: "integer", description: "0-100, gentle to aggressive." },
-          organic: { type: "integer", description: "0-100, electronic to acoustic." },
+          acousticness: { type: "integer", description: "0-100, electronic to acoustic." },
+          density: { type: "integer", description: "0-100, sparse to wall-of-sound." },
+          tempoFeel: {
+            type: "string",
+            enum: [...TEMPO_FEELS],
+            description: "How fast the track feels.",
+          },
+          vocal: { type: "string", enum: [...VOCAL_KINDS] },
           moods: {
             type: "array",
-            items: { type: "string" },
-            description: "2-4 short lowercase feeling descriptors.",
-          },
-          vibes: {
-            type: "array",
-            items: { type: "string" },
-            description: "0-3 curated vibe names this track belongs with.",
+            items: { type: "string", enum: [...MOOD_VOCABULARY] },
+            minItems: 2,
+            maxItems: 4,
+            description: "2-4 terms from the vocabulary, matching the axes given.",
           },
           times: {
             type: "array",
             items: { type: "string", enum: [...TIME_SLOTS] },
+            minItems: 1,
             description: "Times of day the track fits.",
           },
         },
-        required: ["id", "energy", "valence", "intensity", "organic", "moods", "vibes", "times"],
+        required: [
+          "id", "energy", "valence", "intensity", "acousticness",
+          "density", "tempoFeel", "vocal", "moods", "times",
+        ],
         additionalProperties: false,
       },
     },
@@ -166,6 +190,14 @@ const SCHEMA = {
   additionalProperties: false,
 } as const;
 
+/**
+ * What the model sees about one track.
+ *
+ * Metadata only. Curated-playlist membership is deliberately absent: telling the
+ * labeller a track already sits on a playlist called "late night" would make the
+ * label a restatement of the filing rather than a judgement about the sound, and
+ * would produce different coordinates for the same track in two libraries.
+ */
 function describe(t: Track): string {
   const bits = [
     `id=${t.id}`,
@@ -174,7 +206,6 @@ function describe(t: Track): string {
     t.album ? `album: ${t.album}` : "",
     t.genres.length ? `genre: ${t.genres.join("/")}` : "",
     t.tags.length ? `tags: ${t.tags.slice(0, 8).map((x) => x.name).join(", ")}` : "",
-    t.vibes.length ? `ALREADY ON: ${t.vibes.join(", ")}` : "",
   ].filter(Boolean);
   return bits.join(" | ");
 }
@@ -327,12 +358,10 @@ export class MoodEnricher {
    * kept for small trial runs where waiting on a queue is the worse deal.
    */
   async runBatched(
-    store: Store,
     pending: Track[],
     onBatch: (rows: (Mood & { id: string })[]) => Promise<void>,
   ): Promise<void> {
-    const vibeNames = Object.keys(store.vibes);
-    const system = taxonomyPrompt(store, vibeNames);
+    const system = taxonomyPrompt();
     const batches: Track[][] = [];
     for (let i = 0; i < pending.length; i += BATCH) batches.push(pending.slice(i, i + BATCH));
 
@@ -427,8 +456,7 @@ export class MoodEnricher {
     pending: Track[],
     onBatch: (rows: (Mood & { id: string })[]) => Promise<void>,
   ): Promise<void> {
-    const vibeNames = Object.keys(store.vibes);
-    const system = taxonomyPrompt(store, vibeNames);
+    const system = taxonomyPrompt();
     const batches: Track[][] = [];
     for (let i = 0; i < pending.length; i += BATCH) batches.push(pending.slice(i, i + BATCH));
 

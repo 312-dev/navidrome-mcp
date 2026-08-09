@@ -16,8 +16,12 @@
 
 import type { MoodTerm } from "./vocabulary.js";
 
-/** Where a track sits. v2 adds density/tempo/vocal, which drive flow. */
-export interface MoodPoint {
+/**
+ * The five continuous axes. Split out from `MoodPoint` because the things a
+ * region is defined by — a term's anchor, a vibe's centre — have coordinates but
+ * no tempo, vocal or descriptors of their own.
+ */
+export interface MoodAxes {
   /** 0-100, still -> frantic. */
   energy: number;
   /** 0-100, bleak -> joyful. */
@@ -28,6 +32,10 @@ export interface MoodPoint {
   acousticness: number;
   /** 0-100, sparse/solo -> wall of sound. */
   density: number;
+}
+
+/** Where a track sits. v2 adds density/tempo/vocal, which drive flow. */
+export interface MoodPoint extends MoodAxes {
   tempoFeel: TempoFeel;
   vocal: VocalKind;
   moods: MoodTerm[];
@@ -86,14 +94,15 @@ function vocalCost(a: VocalKind, b: VocalKind): number {
 }
 
 /**
- * Distance between two points, roughly on a 0-100 scale.
+ * Weighted Euclidean distance over the five continuous axes, on a 0-100 scale.
  *
- * Weighted Euclidean over the numeric axes, plus additive ordinal/categorical
- * penalties. Additive rather than folded into the Euclidean term because a
- * tempo or vocal clash is a *disqualifier*, not something that should be
- * averaged away by four axes that happen to agree.
+ * This is the measure a *region* is defined against: a term's anchor and a
+ * vibe's centre are coordinates, so "is this track in that region" cannot ask
+ * about tempo or vocal, which the region does not have. Those are handled
+ * separately — as membership constraints for a vibe, and as transition
+ * penalties between two real tracks.
  */
-export function moodDistance(a: MoodPoint, b: MoodPoint): number {
+export function numericDistance(a: MoodAxes, b: MoodAxes): number {
   const sq =
     W.intensity * (a.intensity - b.intensity) ** 2 +
     W.acousticness * (a.acousticness - b.acousticness) ** 2 +
@@ -101,9 +110,20 @@ export function moodDistance(a: MoodPoint, b: MoodPoint): number {
     W.energy * (a.energy - b.energy) ** 2 +
     W.valence * (a.valence - b.valence) ** 2;
   const totalW = W.intensity + W.acousticness + W.density + W.energy + W.valence;
-  const numeric = Math.sqrt(sq / totalW);
+  return Math.sqrt(sq / totalW);
+}
+
+/**
+ * Distance between two tracks, roughly on a 0-100 scale.
+ *
+ * The numeric distance plus additive ordinal/categorical penalties. Additive
+ * rather than folded into the Euclidean term because a tempo or vocal clash is
+ * a *disqualifier*, not something that should be averaged away by four axes
+ * that happen to agree.
+ */
+export function moodDistance(a: MoodPoint, b: MoodPoint): number {
   const tempo = Math.abs(TEMPO_INDEX[a.tempoFeel] - TEMPO_INDEX[b.tempoFeel]) * TEMPO_STEP_COST;
-  return numeric + tempo + vocalCost(a.vocal, b.vocal);
+  return numericDistance(a, b) + tempo + vocalCost(a.vocal, b.vocal);
 }
 
 /** Centroid of a set — the "region" a vibe occupies. */

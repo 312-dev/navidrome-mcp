@@ -38,29 +38,55 @@ order does not matter and the set should grow with the library.
 
 The heuristic: *"a playlist for X"* is static; *"all my Y"* is smart.
 
-## Phase 0 — Portability pass (do first)
+## Phase 0 — Portability pass ✅ done 2026-08-09
 
-`src/vocabulary.ts` and `src/moodspace.ts` are already universal. The rest of the
-connector still assumes one user's playlists in ~20 call sites:
+- [x] `mood.ts` — the labelling prompt is built from `MOOD_ANCHORS` (coordinates
+      + glosses), not from anyone's playlists. `vibes` dropped from the model's
+      output entirely, and `moods` is now a schema `enum` so an off-vocabulary
+      term is not a thing the model can return.
+- [x] Mood schema v2 in the connector: `acousticness`/`density`/`tempoFeel`/
+      `vocal` added, `organic` gone, `Mood extends MoodPoint`. Snapshot version
+      4 → 5, so v1 labels are discarded rather than migrated (three of the axes
+      were never measured).
+- [x] `daylist.ts` — `vibeFits` iterates `UNIVERSAL_VIBES`. Lift where history
+      exists, the region's own `hours` where it does not, and every region is
+      reported so an unlabelled library says so instead of returning nothing.
+- [x] `index.ts` — `vibe_regions` replaces `curated_vibes`; `get_vibe_profile`
+      resolves a region *or* a playlist and reports the library's own centroid
+      and spread for it; tool descriptions no longer quote one library's counts.
+- [x] `query.ts` — `mood_vibes` matches computed membership; `moods` folds
+      synonyms so a caller asking for "chill" gets `mellow`; the curated-playlist
+      affinity bonus survives as a term that contributes zero when absent.
+- [x] **`src/propagate.ts` deleted** (140 lines). It trained a nearest-centroid
+      classifier to guess vibe membership because playlists were the only labels
+      available. Membership is now a measurement.
+- [x] `scripts/check-vocabulary.ts` + `npm run check:vocab`.
 
-- [ ] `mood.ts:90,177,334,430` — the labelling prompt is *built from* the user's
-      playlist names and sampled tracks. Replace with the anchored vocabulary and
-      glosses from `vocabulary.ts`, so a library with no playlists still gets a
-      taxonomy to label against.
-- [ ] `daylist.ts:100,104` — `vibeFits` iterates `store.vibes`; compute vibe
-      membership from `UNIVERSAL_VIBES` anchors instead
-- [ ] `index.ts:124,301,393,568` — `describe_library`, `get_vibe_profile`,
-      `similar_tracks` co-occurrence
-- [ ] `query.ts:270` — the affinity bonus for curated membership becomes
-      *optional enrichment*, not a foundation. Keep it when playlists exist.
-- [ ] **Delete `src/propagate.ts`.** It trained a nearest-centroid classifier to
-      guess vibe membership because playlists were the only labels available.
-      With defined anchors, membership is `moodDistance(track, vibe.centre) <
-      vibe.radius` — exact, no training set, no accuracy caveat. ~130 lines go.
+**Exit met:** every remaining `store.vibes` read is optional enrichment — the
+explicit `vibes` filter, the affinity bonus, `similar_tracks` co-occurrence, the
+`curated_playlists` block, and persistence.
 
-**Exit:** nothing outside an optional-enrichment path reads `store.vibes`.
+### Two things this turned up
+
+**`src/store.ts` was invisible to grep.** It used a literal NUL as a string
+separator, written as the raw byte rather than an escape, so `file` classed it as
+`data` and plain `grep` skipped it *silently* — no match, no warning, exit 0.
+That is why this plan's original call-site list missed 15 sites in that file,
+including the `propagateVibes` wiring. Both occurrences are now `\u0000` escapes
+and the file is ordinary text again. Worth remembering as a class of bug: a
+search that reports success while searching nothing.
+
+**The vibe radii were wrong.** Guessed by eye last session; measured against a
+uniform sample of mood-space, `driving` covered 46% of it and a typical point
+fell in 3.9 regions. Retuned to ~7% each. Separately, no radius could keep `warm`
+(valence 66) out of `melancholy` (valence 24) — a mean over five axes cannot
+enforce a requirement on one — so affect-named regions now carry a valence bound
+alongside the existing tempo/vocal ones. Both are recorded in `DESIGN-mood-v2.md`
+and asserted by `check:vocab`.
 
 ## Phase 1 — Schema v2 into the plugin
+
+The connector now defines the schema; this ports it to the Go side.
 
 - [ ] Add `density`, `tempo_feel` (`still|slow|mid|driving|frantic`), `vocal`
       (`instrumental|sung|rapped|mixed`)
@@ -94,10 +120,13 @@ measured v1 run: 876,734 output tokens for 9,193 tracks. `maxSpendUsd: 25` and
 
 ## Phase 3 — Connector reads tags
 
-- [ ] Read mood from Navidrome tags rather than the local snapshot; drop the v1
-      `moods` map
-- [ ] Vibe membership from `UNIVERSAL_VIBES` anchors
+- [ ] Read mood from Navidrome tags rather than the local snapshot; drop the
+      connector's own `moods` map
 - [ ] `cohesion_radius` on `search_tracks`, using `moodDistance`
+- [ ] Re-measure the vibe radii against a real labelled library. They are
+      currently calibrated to ~7% of a *uniform* sample of mood-space, and real
+      collections cluster centrally — so a central region may catch far more of
+      an actual library than of the space.
 - [ ] **`aestheticProfile(hourBucket, weekdayType, windowDays)`** — optional.
       Where listening history exists, project listens onto mood points and bucket
       by hour to get a measured centroid. Where it does not, fall back to each
@@ -162,7 +191,6 @@ gone. The next worker change carries the sync.
 
 ## Sequencing
 
-Phase 0 first — no point porting the plugin's prompt to a design the connector
-still contradicts. Then 1–2 gate 3–4: the connector cannot read tags that do not
-exist, and cohesion cannot be evaluated without the v2 axes. Phase 5's remaining
-item is independent. Phase 6 should not wait.
+Phase 0 is done. 1–2 gate 3–4: the connector cannot read tags that do not exist,
+and cohesion cannot be evaluated without the v2 axes. Phase 5's remaining item is
+independent. Phase 6 should not wait.
