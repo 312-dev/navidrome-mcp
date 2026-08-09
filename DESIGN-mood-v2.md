@@ -25,7 +25,16 @@ label is right. Using it as a playlist filter is wrong. Measured worst cases:
 word — `warm` is 392/758 Rock, `anthemic` 483/615. Filtering by genre barely
 narrows anything.
 
-## What the data says to do
+## What the data said, and what it means
+
+> **Superseded in part, 2026-08-09.** The measurements below are why the design
+> uses anchors; they are no longer the *source* of the vocabulary. Deriving terms
+> from one library bakes that library's shape into them — a rock-heavy collection
+> yields `riffy` and `bass-heavy`, which say nothing useful about a jazz one. The
+> shipped vocabulary in `src/vocabulary.ts` is 52 terms **defined** by explicit
+> anchors in mood-space, covering the space rather than a sample of it, organised
+> on Russell's circumplex. Read this section as the evidence for that decision,
+> not as a description of the output.
 
 Scoring every word used ≥20 times by the spread of its tracks across
 intensity/acousticness/valence separates them cleanly:
@@ -38,6 +47,13 @@ intensity/acousticness/valence separates them cleanly:
 So the selection rule is mechanical: **keep words that describe how a track
 sounds; drop words that describe how it makes you feel about something else.**
 122 of 216 candidates survive at spread ≤ 12.
+
+That rule is **linguistic, not local** — association words behave the same way in
+any collection — which is what makes it safe to apply as a principle to a
+universal vocabulary rather than re-measuring per library. The association words
+still appear in `src/vocabulary.ts`, but as *synonyms* mapping onto anchored
+terms (`nostalgic` → `wistful`, `raw` → `gritty`), because users will type them
+regardless.
 
 And the medians reveal the deeper point — a coherent word *is* a named region in
 mood-space:
@@ -114,6 +130,18 @@ Selecting a coherent set is necessary but not sufficient — order still matters
 A `sequence_tracks` step orders a chosen set to minimise total transition cost
 (the same distance metric) subject to an energy arc appropriate to the hour:
 a morning list ramps gently, an evening list peaks and settles.
+
+## Playlists, not just daylists
+
+The daylist is one preset. The general capability is **prompt → PlaylistSpec →
+executor**: a user describes what they want, that compiles into a region plus
+filters plus diversity and sequencing constraints, and a deterministic engine
+executes it.
+
+Static track lists are the default output. Navidrome's smart playlists can
+express a box in mood-space but not a sphere, per-artist caps, or ordering — so
+they reintroduce most of the problem this design exists to solve. They remain a
+documented path for standing collections where order does not matter.
 
 ## Where it lives
 

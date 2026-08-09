@@ -1,6 +1,16 @@
 # Finishing plan
 
-Where this effort stands and what remains. Written to survive a context compaction.
+Written to survive a context compaction. Reflects the state on 2026-08-09.
+
+## What this is
+
+A **prompt-to-playlist** system for any Navidrome library. A user describes what
+they want in words; that compiles into a specification; a deterministic engine
+selects and sequences the tracks. A scheduled "daylist" is one preset of that,
+not the product.
+
+Nothing in the design may assume a particular user's library, playlists, or
+listening history. Those are optional enrichment, never the foundation.
 
 ## The two halves
 
@@ -8,116 +18,151 @@ Where this effort stands and what remains. Written to survive a context compacti
 |---|---|---|
 | What | MCP connector, TypeScript | Navidrome WASM plugin, Go |
 | Runs | Hetzner gateway, port 8012 | Inside Navidrome on the Mac Mini |
-| Owns | Query engine, cohesion, daylist | **Labelling**, writes mood tags into Navidrome |
+| Owns | Prompt parsing, selection, sequencing | **Labelling**, writes mood tags into Navidrome |
 | State | deployed; v1 labels to be discarded | installed + enabled, **has never written a tag** |
 
-**Architecture decision, locked:** the plugin labels and writes tags; the connector
-reads those tags instead of keeping its own snapshot, and owns everything
-downstream. Tags are the better home — they outlive the connector, and Music
-Assistant plus every Subsonic client can read them. One label, many readers.
+**Architecture, locked:** the plugin labels and writes tags; the connector reads
+those tags and owns everything downstream. Tags outlive the connector, and Music
+Assistant plus every Subsonic client can read them.
+
+## Static playlists are the default
+
+Navidrome's smart playlists (NSP) can express a *box* in mood-space but not a
+sphere, not per-artist diversity caps, and not ordering — which is most of the
+way back to the problem this whole design exists to fix. They also require an
+edit to Navidrome's `mappings.yaml` to register numeric tags.
+
+So: **static by default.** `refresh: "smart"` stays in the spec as a documented
+power-user path for standing collections ("everything calm and acoustic") where
+order does not matter and the set should grow with the library.
+
+The heuristic: *"a playlist for X"* is static; *"all my Y"* is smart.
+
+## Phase 0 — Portability pass (do first)
+
+`src/vocabulary.ts` and `src/moodspace.ts` are already universal. The rest of the
+connector still assumes one user's playlists in ~20 call sites:
+
+- [ ] `mood.ts:90,177,334,430` — the labelling prompt is *built from* the user's
+      playlist names and sampled tracks. Replace with the anchored vocabulary and
+      glosses from `vocabulary.ts`, so a library with no playlists still gets a
+      taxonomy to label against.
+- [ ] `daylist.ts:100,104` — `vibeFits` iterates `store.vibes`; compute vibe
+      membership from `UNIVERSAL_VIBES` anchors instead
+- [ ] `index.ts:124,301,393,568` — `describe_library`, `get_vibe_profile`,
+      `similar_tracks` co-occurrence
+- [ ] `query.ts:270` — the affinity bonus for curated membership becomes
+      *optional enrichment*, not a foundation. Keep it when playlists exist.
+- [ ] **Delete `src/propagate.ts`.** It trained a nearest-centroid classifier to
+      guess vibe membership because playlists were the only labels available.
+      With defined anchors, membership is `moodDistance(track, vibe.centre) <
+      vibe.radius` — exact, no training set, no accuracy caveat. ~130 lines go.
+
+**Exit:** nothing outside an optional-enrichment path reads `store.vibes`.
 
 ## Phase 1 — Schema v2 into the plugin
-
-The plugin currently emits v1's four axes and free-form descriptors. Port the v2
-schema (see `DESIGN-mood-v2.md`) into its prompt and output schema:
 
 - [ ] Add `density`, `tempo_feel` (`still|slow|mid|driving|frantic`), `vocal`
       (`instrumental|sung|rapped|mixed`)
 - [ ] Rename `organic` → `acousticness`
-- [ ] Constrain `moods` to the 53-term controlled vocabulary (`src/vocabulary.ts`
-      here is the source of truth; port the list and the synonym map)
-- [ ] Write labels as Navidrome tags, one tag per axis plus `mood` multi-value
-- [ ] Sweep the plugin's own comments/docs for drift (hard rule)
+- [ ] Replace the plugin's built-in 60-word vocabulary. **It was selected by
+      frequency** — its own source comments read "high frequency (300+)" — so it
+      kept `nostalgic`, `cinematic`, `raw`, `hypnotic`, `rowdy`, every word that
+      measured as spanning the whole space. Port the 52 anchored terms and 146
+      synonyms from `src/vocabulary.ts`, and put the anchors and glosses in the
+      prompt so the labeller places tracks against definitions.
+- [ ] Write the numeric axes as tags, not just `MOOD` words. Today it only calls
+      `WriteMood(path, canonical)`; without the axes the cohesion engine has
+      nothing to compute distance from.
+- [ ] Sweep the plugin's comments/docs for drift (hard rule)
 
-**Exit:** a 40-track sample run writes real tags visible in `/api/tag`, and
-`mood=*` returns non-zero.
+**Exit:** a sample run writes real tags visible in `/api/tag`, and `mood=*`
+returns non-zero.
 
-## Phase 2 — Relabel the library
+## Phase 2 — Relabel
 
-- [ ] Set `dryRun: false`, `run: everything`, model Sonnet 5
+- [ ] `dryRun: false`, `run: everything`, provider/model set
 - [ ] Confirm the preflight estimate before committing
-- [ ] Verify `run on ingest` labels newly-added music (the question left open
-      on 2026-08-06)
+- [ ] Verify `autoSync` labels newly-added music (default on, `*/15 * * * *`)
 
-**Cost:** ~$11 on Sonnet 5 at intro pricing, which **ends 2026-08-31**; ~$17
-after. Derived from the measured v1 run (876,734 output tokens for 9,193 tracks),
-adjusted for the plugin's `batchSize: 20`. Existing `maxSpendUsd: 25` covers it.
+**Cost:** ~$5.50 on Sonnet 5 — `batchMode: true` is already on, which is the
+50% Batch API discount. Intro pricing ends **2026-08-31**. Derived from the
+measured v1 run: 876,734 output tokens for 9,193 tracks. `maxSpendUsd: 25` and
+`lifetimeCapUsd: 100` both cover it.
 
-⚠️ `dryRun` costs full price — it protects your files, not your bill. Do not run
-`everything` in dry-run mode expecting a free rehearsal.
+⚠️ `dryRun` costs full price. It protects files, not the bill.
 
-## Phase 3 — Connector reads tags, and the keystone
+## Phase 3 — Connector reads tags
 
-- [ ] Read mood from Navidrome tags rather than the local snapshot; drop the
-      v1 `moods` map
-- [ ] **`aestheticProfile(hourBucket, weekdayType, windowDays)`** — the keystone.
-      Project the last N days of ListenBrainz listens onto their tracks' mood
-      points, bucket by hour, return `{centroid, radius, topVibes, topMoods,
-      drift}`. This is what turns "my Tuesday-evening aesthetic" into a region
-      that can be sampled.
+- [ ] Read mood from Navidrome tags rather than the local snapshot; drop the v1
+      `moods` map
+- [ ] Vibe membership from `UNIVERSAL_VIBES` anchors
 - [ ] `cohesion_radius` on `search_tracks`, using `moodDistance`
-- [ ] Per-vibe centroid + `spreadRadius` computed at index time
+- [ ] **`aestheticProfile(hourBucket, weekdayType, windowDays)`** — optional.
+      Where listening history exists, project listens onto mood points and bucket
+      by hour to get a measured centroid. Where it does not, fall back to each
+      vibe's `hours` affinity. History is the user's choice to connect.
 
-**Exit:** `search_tracks` with a centroid and radius returns a set whose
-`flowScore` is materially better than the same-sized set filtered by mood word
-alone. Measure both; the v1 failure cases (Debussy vs Metallica under `tender`)
-are the regression test.
+**Exit:** the v1 failures are the regression test — a `tender` query must stop
+returning Debussy and Metallica together, and `flowScore` on a cohesion set must
+beat the same-size set filtered by mood word alone.
 
-## Phase 4 — Deterministic daylist
+## Phase 4 — Prompt to playlist
 
-Every step except naming is computable:
+The general capability. A `PlaylistSpec` carries: region (centre + radius),
+filters, history constraints, diversity caps, size, sequencing arc, refresh mode.
 
 | Step | How |
 |---|---|
-| Pick the vibe | `argmax(lift)` with a recency-decay penalty |
-| Derive constraints | that vibe's centroid ± radius for this hour bucket |
-| Select ~25 tracks | constrained sampling, `max_per_artist`, rotation exclusion |
+| Prompt → spec | one model call — parsing novel intent is the real job for an LLM |
+| Select | constrained sampling within the region, diversity caps, rotation exclusion |
 | Sequence | `sequence()` — greedy nearest-neighbour along an energy arc |
-| **Name it** | one ~200-token model call |
-| Commit | `commit_daylist` |
+| Name | template, or a ~200-token call |
+| Commit | write the playlist |
 
-- [ ] `generate_daylist` tool doing all of the above
-- [ ] Keep the LLM path for ad-hoc conversational requests ("something for a
-      rainy drive") — it supplies the region, the same engine does the rest
-
-**Cost:** ~$0.0002/run, about **14¢/month hourly**, versus $40–100 for a
-full-LLM run.
+- [ ] `create_playlist_from_prompt` implementing the above
+- [ ] Daylist as a scheduled preset — spec derived from the hour, no prompt
+- [ ] `refresh: "smart"` back-end (NSP rules) as a later add-on
 
 ## Phase 5 — Ship
 
-**The hostname is `navidrome-mcp.graysons.network`**, not `navidrome.` — commit
-`724e5fa` renamed it and everything Cloudflare-side already matches.
+Verified 2026-08-09. The hostname is **`navidrome-mcp.graysons.network`** —
+commit `724e5fa` renamed it from `navidrome.`
 
-Verified 2026-08-09:
+- [x] Worker deployed (2026-08-04 21:50 UTC), routing `navidrome-mcp`
+- [x] Access-for-SaaS redirect URI registered
+- [x] Live probe returns 403, matching the known-good `xbox` connector
+- [x] Orphaned `navidrome.graysons.network/*` route deleted
+- [x] Added to Claude Code as MCP server `navidrome` (user scope)
+- [ ] **Complete the OAuth login** — run `/mcp`, pick `navidrome`. Currently
+      "Needs authentication". This also proves the worker→backend round trip,
+      which the 2026-08-06 audit flagged as never verified end to end.
+- [ ] Recurring task for the daylist preset
 
-- [x] Worker deployed (2026-08-04 21:50 UTC) and routing `navidrome-mcp`
-- [x] `https://navidrome-mcp.graysons.network/callback` registered on the
-      **MCP Gateway** Access-for-SaaS app
-- [x] Live probe returns 403 — identical to the known-good `xbox` connector,
-      i.e. the Access challenge, which is correct for an unauthenticated request
-- [x] Orphaned `navidrome.graysons.network/*` route deleted (it pointed at the
-      worker, which has no `navidrome` key, and answered a confusing 405)
-- [ ] **Add the connector in claude.ai** at `https://navidrome-mcp.graysons.network`
-- [ ] Create the recurring task (prompt in `DAYLIST.md`)
-
-Known drift, harmless: the live worker predates commits `bf8b34e` and `0a401b9`,
-so its `BACKENDS` still lists sophtron / spotify / todoist / wrongcard. Their DNS
-is gone, so nothing reaches them. The next worker change will carry the sync.
+Known drift, harmless: the live worker predates `bf8b34e` and `0a401b9`, so its
+`BACKENDS` still lists sophtron / spotify / todoist / wrongcard. Their DNS is
+gone. The next worker change carries the sync.
 
 ## Phase 6 — Hygiene
 
-- [ ] **`navidrome-mood` has no git remote.** 13 commits of Go and the built
-      `.ndp` exist only on this laptop. Push it somewhere.
+- [ ] **`navidrome-mood` has no git remote.** 15 commits of Go and the built
+      `.ndp` exist only on this laptop. The one item where delay risks real loss.
+- [ ] Reissue `op://Dev/Cloudflare API Token: Worker Editor` — it is invalid
+      (`code 1000`), which is why Cloudflare work currently needs the Production
+      global key. Scopes: Workers Scripts:Edit, Workers Routes:Edit (zone
+      graysons.network), Workers KV:Read, Account Settings:Read, Access Apps:Edit.
 - [ ] Rotate the ListenBrainz token (surfaced in a transcript 2026-08-04)
-- [ ] Rotate the sandbroker dashboard bearer token: `pkill -f
-      '[s]andbroker/bin/sandbroker-dashboard'`, relaunches at next login
-- [ ] Navidrome password rotation (pre-existing, tracked in memory)
-- [ ] Delete `DESIGN-mood-v2.md`'s v1-specific numbers once v2 data exists, or
-      mark them as the historical baseline
+- [ ] Navidrome password rotation (pre-existing)
 
-## Sequencing note
+## Blocked right now
 
-Phases 1–2 gate everything: the connector cannot read tags that do not exist, and
-the cohesion work cannot be evaluated without v2 axes. Phase 5 is independent and
-can happen any time. Phase 6 should not wait — the missing git remote is the one
-item where delay risks real loss.
+**Navidrome is down.** The Mini answers on the tailnet (`100.93.15.8`) but
+`:4533` refuses connections, which is also why the connector's port 8012 probes
+`000`. No shell access to the Mini from here. Phases 1–3 need it back.
+
+## Sequencing
+
+Phase 0 first — no point porting the plugin's prompt to a design the connector
+still contradicts. Then 1–2 gate 3–4: the connector cannot read tags that do not
+exist, and cohesion cannot be evaluated without the v2 axes. Phase 5's remaining
+item is independent. Phase 6 should not wait.
