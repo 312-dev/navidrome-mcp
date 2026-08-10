@@ -163,33 +163,53 @@ them. `navidrome-moodspace` is the leading alternative -- it names the coordinat
 system rather than the word list, and still contains "mood" for discoverability.
 Undecided; rename before publishing a remote, not after.
 
-## Phase 2: Plugin becomes the enrichment authority
+## Phase 2: Plugin becomes the enrichment authority - done 2026-08-09 (`d7e9ca4`)
 
-- [ ] Port the 52 anchored terms, 146 synonyms and 14 regions into Go as the
+- [x] Port the 52 anchored terms, 146 synonyms and 14 regions into Go as the
       canonical vocabulary. **The existing 60 words were selected by frequency**
       (the source comments read "high frequency (300+)"), so they kept
       `nostalgic`, `cinematic`, `raw`, `hypnotic`, `rowdy`, every word measured
-      as spanning the whole space.
-- [ ] Rebuild `internal/prompt` from anchors and glosses. It currently opens
-      "The listener has hand-curated playlists that ARE his mood vocabulary" and
-      samples tracks from them, the same defect the connector just shed.
-- [ ] Schema v2: add `density`, `tempo_feel`, `vocal`; rename `organic` →
-      `acousticness`
-- [ ] Write the numeric axes, `tempo`, `vocal` and `vibe` as tags, not only
-      `MOOD` words. Today it calls `WriteMood(path, canonical)` and nothing else,
-      so the cohesion engine would have nothing to measure.
-- [ ] Ship a `Tags` config snippet and a README covering standalone use:
+      as spanning the whole space. The ported values were diffed against
+      `045184b:src/vocabulary.ts` with zero mismatches on coordinates, glosses,
+      synonyms, region centres, radii and hard bounds.
+- [x] Rebuild `internal/prompt` from anchors and glosses. `Library` ended up an
+      empty struct: `TopGenres` and `Decades` were dropped because telling the
+      model "this collection is mostly metal" invites relative scoring, so a
+      mild metal track returns intensity 40 because it is mild for metal, and
+      the axes would mean something different in every library.
+- [x] Schema v2: add `density`, `tempo`, `vocal`; rename `organic` to
+      `acousticness`. Out-of-range values are rejected rather than clamped,
+      because the connector reads the seven all-or-nothing and a clamped value
+      is a plausible wrong answer nothing downstream can detect.
+- [x] Write all ten tags. `vibe` is computed from the axes by `mood.VibesFor`,
+      never asked of the model. Relabelling replaces rather than merges, so a
+      stale `vibe` cannot outlive the axes that produced it.
+- [x] Ship a `Tags` config snippet and a README covering standalone use:
       each tag needs a `[Tags.<name>]` entry in Navidrome's own config file,
       with `Type = "int"` on the numeric axes, before a smart playlist can
       filter on them
-- [ ] Fix the manifest: it promises "keeps natural-language playlists refreshed
+- [x] Fix the manifest: it promised "keeps natural-language playlists refreshed
       on a schedule" and no such code exists
-- [ ] Drop the Subsonic playlist-reading permission if the prompt no longer
-      needs it: a smaller permission surface is part of standing alone
-- [ ] Sweep the plugin's comments/docs for drift (hard rule)
+- [x] Drop the Subsonic playlist-reading permission. Grepping every `.go` file
+      found zero uses of the Subsonic API, so `subsonicapi` and the `users`
+      permission that existed only to support it are both gone.
+- [x] Sweep the plugin's comments/docs for drift (hard rule)
 
-**Exit:** a sample run writes real tags visible in `/api/tag`, `mood=*` returns
-non-zero, and a Navidrome smart playlist filters on one of the numeric axes.
+Also found while doing it: `batchMode`, `statusToken`, `relayUrl` and
+`sendTrackTitles` are declared config that no Go file reads. `SupportsBatch()`
+and the discounted `Cost()` path exist but nothing submits to a batch endpoint,
+so the manifest's "about half price" is not currently true. Left in place and
+recorded under Known limits in the plugin README.
+
+A record written before this carries the mood words alone but deserialises
+cleanly with the new axes reading 0, so `RecordSchema` gates `skipTagged` and
+those tracks go back through labelling.
+
+**Exit (not yet met):** a sample run writes real tags visible in `/api/tag`,
+`mood=*` returns non-zero, and a Navidrome smart playlist filters on one of the
+numeric axes. Measured 2026-08-09: `/api/tag` lists only genre, disctotal, isrc,
+recordlabel, barcode, tracktotal, copyright, encodedby and media, and
+`?mood=warm` returns 0 of 9,193. Nothing has been written yet.
 
 ## Phase 3: Relabel and join the halves
 
