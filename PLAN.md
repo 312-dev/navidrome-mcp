@@ -125,13 +125,24 @@ and the file is ordinary text again. `matchKey` in `src/listenbrainz.ts` held a
 third, hiding that file the same way, and is escaped too. Worth remembering as a
 class of bug: a search that reports success while searching nothing.
 
-**The vibe radii were wrong.** Guessed by eye last session; measured against a
-uniform sample of mood-space, `driving` covered 46% of it and a typical point
-fell in 3.9 regions. Retuned to ~7% each. Separately, no radius could keep `warm`
-(valence 66) out of `melancholy` (valence 24), a mean over five axes cannot
-enforce a requirement on one, so affect-named regions now carry a valence bound
-alongside the existing tempo/vocal ones. Both are recorded in `DESIGN-mood-v2.md`
-and asserted by `check:vocab`.
+**The vibe radii were wrong twice, for different reasons.** First they were
+guessed by eye, and a uniform sweep of mood-space showed `driving` covering 46%
+of it with a typical point falling in 3.9 regions. Retuning to ~7% of that sweep
+fixed the sweep and not the problem: a library does not spread through the cube.
+Measured on the 9,195 labelled tracks, two picked at random sit 17.7 apart at the
+median where two uniform points sit 39.1, so radii of 18 to 24 were wider than
+the typical gap between any two tracks and `driving` was tagging 45% of the
+actual library while `focus` reached 111 tracks.
+
+The radii are now fitted to the real distribution, about 8% of the library each,
+in `navidrome-mood` 0.4.0. The lesson generalises past this one number: a
+measurement taken against a uniform sample answers a question nobody asked, and
+it will pass confidently while the thing it is standing in for fails.
+
+Separately, no radius could keep `warm` (valence 66) out of `melancholy`
+(valence 24), because a mean over five axes cannot enforce a requirement on one,
+so affect-named regions carry a valence bound alongside the existing tempo/vocal
+ones. Both are recorded in `DESIGN-mood-v2.md` and asserted by `check:vocab`.
 
 ## Phase 1: Connector stops enriching ✅ done 2026-08-09 (`d458b8c`)
 
@@ -250,9 +261,10 @@ config has not been given the `Tags` block.
       rests on, but it has never been exercised against a custom tag. Check this
       the moment the first tag is written, not after building on top of it.
 - [ ] `cohesion_radius` on `search_tracks`, using `moodDistance`
-- [ ] Re-measure the vibe radii against the real labelled library. They are
-      calibrated to ~7% of a *uniform* sample of mood-space, and real collections
-      cluster centrally.
+- [x] Re-measure the vibe radii against the real labelled library. Done in
+      `navidrome-mood` 0.4.0: fitted to ~8% of the real distribution, applied by
+      the new no-cost `revibe` run mode, which recomputes `vibe` from axes
+      already in the files rather than re-labelling.
 - [ ] **`aestheticProfile(hourBucket, weekdayType, windowDays)`**: optional.
       Where listening history exists, project listens onto mood points and bucket
       by hour to get a measured centroid. Where it does not, fall back to each

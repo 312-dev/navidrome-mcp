@@ -60,6 +60,13 @@ same track gets the same coordinates in anyone's library. Deriving the words fro
 collection instead would bake that collection's shape into them: a rock-heavy library yields
 `riffy` and `bass-heavy`, which say nothing useful about a jazz one.
 
+The radii are the one part fitted to a collection rather than defined, and the split is
+deliberate. A centre says what a vibe *means* and must not move; a radius says how close
+counts as close, which depends on how tightly the music clusters. Fitting them against an
+even spread of the coordinate space produced regions wider than the typical gap between any
+two tracks in a real library, so they are fitted against a measured distribution instead.
+Coordinates therefore travel between libraries unchanged; region membership is calibrated.
+
 Words alone cannot carry cohesion, which is why the axes exist. Measured on a real library,
 `tender` covered both Debussy's *Suite bergamasque* and Metallica's *Nothing Else Matters*:
 both labels correct, and useless as a playlist filter. Distance in mood-space separates them.
