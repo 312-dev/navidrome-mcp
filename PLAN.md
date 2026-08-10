@@ -205,11 +205,24 @@ A record written before this carries the mood words alone but deserialises
 cleanly with the new axes reading 0, so `RecordSchema` gates `skipTagged` and
 those tracks go back through labelling.
 
-**Exit (not yet met):** a sample run writes real tags visible in `/api/tag`,
-`mood=*` returns non-zero, and a Navidrome smart playlist filters on one of the
-numeric axes. Measured 2026-08-09: `/api/tag` lists only genre, disctotal, isrc,
-recordlabel, barcode, tracktotal, copyright, encodedby and media, and
-`?mood=warm` returns 0 of 9,193. Nothing has been written yet.
+**Exit: met against a local Navidrome 0.63.2 on 2026-08-09, not yet against the
+real library.** Two fixtures were tagged by the plugin's own writer and served by
+two containers, one with the `Tags` config block and one without:
+
+- Without it, only `mood` survived. The nine other tags were dropped with no
+  error, which is exactly the invisible failure the README warns about.
+- With it, all ten came back through `/api/song`, `vibe` intact as a
+  multi-valued tag with spaces preserved (`wind down`, `slow morning`).
+- A `.nsp` smart playlist combining `gt moodenergy 50`, `lt moodvalence 45` and
+  `is moodvocal sung` selected the right track, so the numeric axes really are
+  comparable server-side rather than string-compared.
+- `moodFromTags` parsed both tracks straight from the live API response, and the
+  two sat 113.6 apart in mood-space with no shared vibe. The cross-repo contract
+  holds in both directions.
+
+What remains untested is the real library: the plugin has still never labelled a
+track, because no LLM API key exists in any vault, and the Mac Mini's Navidrome
+config has not been given the `Tags` block.
 
 ## Phase 3: Relabel and join the halves
 
