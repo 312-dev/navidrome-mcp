@@ -36,11 +36,20 @@ query means the same thing in a library that has none of them.
 
 Both were live here until 2026-08-10, and both are silent.
 
-**The history can be a prefix.** ListenBrainz throttles a deep backwards walk, and the
-paging loop used to keep whatever it had and carry on. A truncated history is a valid one:
-nothing distinguishes a quarter of a large account from all of a small one. The index held
-32k of 126k listens for months. Pages are now retried with backoff, and a walk that still
-gives up says so in the log and marks the sync incomplete rather than reporting success.
+**The history can be a prefix, and used to stay one.** ListenBrainz publishes a rate-limit
+budget on every response (`X-RateLimit-Remaining`, `X-RateLimit-Reset-In`; observed 30
+requests per 5 seconds). Overrunning it does not return 429. The server stalls responses,
+first to seconds and then to tens of seconds, and eventually closes the connection
+(`UND_ERR_SOCKET`). The walk then stopped and kept its prefix, which is a perfectly valid
+history: nothing distinguishes a quarter of a large account from all of a small one.
+
+What made that permanent rather than merely unlucky is that the walk always restarted from
+the newest listen, so every later sync re-fetched what it already had and stopped at the
+same wall. The index sat at 32k of 126k for months, including through an explicit full
+resync. Requests are now paced against the published budget, a retry waits for the window
+to turn over instead of spending what is left of it, and an interrupted walk resumes from
+the OLDEST listen held. A sync that still cannot finish leaves the index usable and says
+so, and the next start picks the walk up where it stopped.
 
 **One play can arrive twice.** Scrobbling to both Last.fm and ListenBrainz while also
 running ListenBrainz's Last.fm importer delivers every play from two submitters. The

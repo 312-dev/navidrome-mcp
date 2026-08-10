@@ -122,6 +122,12 @@ interface Snapshot {
   /** Distinct submission clients, indexed by listenCli. */
   listenClients: string[];
   listenCli: number[];
+  /**
+   * Whether the backwards walk has reached the account's start or the floor.
+   * Absent on a file written before resumable backfill, which correctly reads as
+   * "not known to be complete" and costs one backfill attempt to settle.
+   */
+  historyComplete?: boolean;
   taggedTracks: string[];
   taggedArtists: string[];
   playlistRuns: PlaylistRun[];
@@ -205,6 +211,8 @@ export class Store {
 
   syncedAt = 0;
   listensSyncedAt = 0;
+  /** See Snapshot.historyComplete. Drives backfillOlder. */
+  historyComplete = false;
   private trackTags: Record<string, Tag[]> = {};
   private artistTags: Record<string, Tag[]> = {};
   private taggedTracks = new Set<string>();
@@ -248,8 +256,31 @@ export class Store {
       await this.syncLibrary();
       await this.syncListens();
       await this.saveSnapshot();
+    } else if (!this.historyComplete) {
+      // A snapshot whose backwards walk was cut short. Resuming has to happen
+      // without being asked, because the symptom is silent: queries answer
+      // normally against a history that is simply missing its older half, and
+      // nothing prompts anyone to call refresh_index. In the background, since
+      // this is a repair of a usable index rather than a prerequisite for it.
+      void this.resumeHistoryInBackground();
     }
     if (this.opts.enrich) void this.enrichInBackground();
+  }
+
+  private historyResuming = false;
+
+  private async resumeHistoryInBackground(): Promise<void> {
+    if (this.historyResuming) return;
+    this.historyResuming = true;
+    try {
+      log(`listens: history is incomplete at ${this.listens.length}, resuming the walk`);
+      await this.syncListens();
+      await this.saveSnapshot();
+    } catch (e) {
+      log(`listens: resume failed, will try again on next start (${String(e)})`);
+    } finally {
+      this.historyResuming = false;
+    }
   }
 
   // ── persistence ─────────────────────────────────────────────────────────
@@ -261,6 +292,7 @@ export class Store {
       if (s.version !== SNAPSHOT_VERSION) return false;
       this.syncedAt = s.syncedAt;
       this.listensSyncedAt = s.listensSyncedAt;
+      this.historyComplete = s.historyComplete ?? false;
       this.vibes = s.vibes ?? {};
       this.trackTags = s.trackTags ?? {};
       this.artistTags = s.artistTags ?? {};
@@ -353,6 +385,7 @@ export class Store {
       listenKi,
       listenClients,
       listenCli,
+      historyComplete: this.historyComplete,
       taggedTracks: [...this.taggedTracks],
       taggedArtists: [...this.taggedArtists],
       playlistRuns: this.playlistRuns.slice(-200),
@@ -422,12 +455,72 @@ export class Store {
     return false;
   }
 
+  /**
+   * Oldest listen held, or undefined when none are.
+   *
+   * A loop rather than Math.min over a spread: this array reaches six figures,
+   * and spreading it as arguments overflows the stack.
+   */
+  private oldestListen(): number | undefined {
+    let oldest: number | undefined;
+    for (const l of this.listens) if (oldest === undefined || l.ts < oldest) oldest = l.ts;
+    return oldest;
+  }
+
+  /**
+   * Walk further back from the oldest listen already held.
+   *
+   * This is what makes an interrupted history recoverable. The forward pass
+   * below resumes from the NEWEST listen held, so on its own it can never
+   * retrieve anything older, and a walk that died partway left the index frozen
+   * at whatever prefix it had managed. Resuming from the oldest end instead
+   * means every sync gets strictly further back, and a failure costs a delay
+   * rather than the history.
+   */
+  private async backfillOlder(floor: number): Promise<number> {
+    if (!this.lb || this.historyComplete) return 0;
+    const oldest = this.oldestListen();
+    if (oldest !== undefined && oldest <= floor) {
+      this.historyComplete = true;
+      return 0;
+    }
+    const t0 = Date.now();
+    log(`listens: backfilling older than ${oldest ? new Date(oldest * 1000).toISOString().slice(0, 10) : "now"}`);
+    const { listens: older, truncated, reachedEnd } = await this.lb.listens({
+      since: floor,
+      startBefore: oldest,
+      onProgress: (n) => {
+        if (n % 5000 === 0) {
+          log(`listens: ${n} backfilled (${Math.round((Date.now() - t0) / 1000)}s)`);
+        }
+      },
+    });
+    this.listens.push(...older);
+    // Not truncated means the walk ended on its own terms: the account ran out
+    // of listens, or it reached the configured floor. Either way there is
+    // nothing older worth asking for again.
+    if (!truncated) {
+      this.historyComplete = true;
+      log(
+        `listens: history complete, ${older.length} backfilled in ` +
+          `${Math.round((Date.now() - t0) / 1000)}s${reachedEnd ? " (account exhausted)" : " (reached floor)"}`,
+      );
+    } else {
+      log(
+        `listens: backfill INCOMPLETE, ${older.length} added in ` +
+          `${Math.round((Date.now() - t0) / 1000)}s. The next sync resumes from here.`,
+      );
+    }
+    return older.length;
+  }
+
   async syncListens(full = false): Promise<number> {
     if (!this.lb) return 0;
     const floor = Math.floor(Date.now() / 1000) - this.opts.historyDays * 86400;
     // On a cold start take the bounded window; afterwards resume from the newest
     // listen we already hold, which is always newer than the floor.
     const since = full ? floor : Math.max(this.listensSyncedAt, floor);
+    if (full) this.historyComplete = false;
     const t0 = Date.now();
     const { listens: fresh, truncated } = await this.lb.listens({
       since,
@@ -438,11 +531,17 @@ export class Store {
     log(`listens: ${fresh.length} new in ${Math.round((Date.now() - t0) / 1000)}s`);
     if (truncated) {
       log(
-        `listens: WARNING history is incomplete, holding ${this.listens.length + fresh.length}. ` +
-          `Counts and "never listened" are understated until a full resync succeeds.`,
+        `listens: WARNING forward pass incomplete, holding ${this.listens.length + fresh.length}.`,
       );
     }
-    if (fresh.length) {
+    const backfilled = await this.backfillOlder(floor);
+    if (!this.historyComplete) {
+      log(
+        `listens: WARNING history is still incomplete. Counts and "never listened" ` +
+          `are understated until a later sync finishes the walk.`,
+      );
+    }
+    if (fresh.length || backfilled) {
       // Exact-timestamp identity, which is only re-fetch of a listen we already
       // hold. Duplicates from a second submitter never match here, since they
       // carry a different timestamp for the same play; dedupeListens below is
@@ -464,7 +563,7 @@ export class Store {
     }
     this.listensSyncedAt = this.listens.length ? this.listens[this.listens.length - 1]!.ts : 0;
     this.applyListenStats();
-    return fresh.length;
+    return fresh.length + backfilled;
   }
 
   // ── derivation ──────────────────────────────────────────────────────────

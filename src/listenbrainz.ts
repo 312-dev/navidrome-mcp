@@ -48,7 +48,26 @@ class LbHttpError extends Error {
   }
 }
 
+/**
+ * Requests left in the window before we stop and wait it out.
+ *
+ * ListenBrainz publishes its budget on every response as X-RateLimit-Limit,
+ * -Remaining and -Reset-In (observed: 30 requests per 5 seconds). Overrunning it
+ * does not produce a 429. The server stalls responses, first to seconds and then
+ * to tens of seconds, and eventually closes the connection outright
+ * (UND_ERR_SOCKET, "other side closed"). A walk that ignores the budget
+ * therefore looks like it is working right up until it dies.
+ *
+ * Two spare requests is enough to absorb a response that arrives after the
+ * window we based the decision on has already turned over.
+ */
+const RATE_LIMIT_HEADROOM = 2;
+
 export class ListenBrainz {
+  /** Budget from the most recent response. See RATE_LIMIT_HEADROOM. */
+  private rlRemaining = Number.POSITIVE_INFINITY;
+  private rlResetInMs = 0;
+
   constructor(
     private readonly username: string,
     private readonly dispatcher?: unknown,
@@ -58,6 +77,12 @@ export class ListenBrainz {
     const opts: Record<string, unknown> = { headers: { "user-agent": UA } };
     if (this.dispatcher) opts.dispatcher = this.dispatcher;
     const res = await fetch(url, opts as RequestInit);
+
+    const remaining = Number(res.headers.get("x-ratelimit-remaining"));
+    const resetIn = Number(res.headers.get("x-ratelimit-reset-in"));
+    if (Number.isFinite(remaining)) this.rlRemaining = remaining;
+    if (Number.isFinite(resetIn) && resetIn >= 0) this.rlResetInMs = resetIn * 1000;
+
     if (!res.ok) {
       const after = Number(res.headers.get("retry-after") ?? 0);
       throw new LbHttpError(
@@ -70,11 +95,32 @@ export class ListenBrainz {
   }
 
   /**
+   * Wait out the window when the published budget is nearly spent.
+   *
+   * Cheap by construction: at 30 requests per 5 seconds a full 127-page history
+   * costs about 20 seconds of waiting in total, against a walk that previously
+   * spent 20 seconds on a SINGLE stalled page before dying.
+   */
+  private async pace(): Promise<void> {
+    if (this.rlRemaining > RATE_LIMIT_HEADROOM || this.rlResetInMs <= 0) return;
+    await sleep(this.rlResetInMs + 250);
+    // Assume the window turned over. The next response corrects this either way.
+    this.rlRemaining = Number.POSITIVE_INFINITY;
+  }
+
+  /**
    * Retry a page, honouring Retry-After when the server sends one.
    *
    * A 4xx that is not 429 is the caller's fault (a wrong username, a malformed
    * bound) and will fail identically on every attempt, so it is raised at once
    * rather than slept over.
+   *
+   * The floor of one rate-limit window matters. The failure seen in practice is
+   * a dropped socket after overrunning the budget, and retrying inside the same
+   * window just spends what is left of it: four retries at 1, 2, 4 and 8 seconds
+   * all failed that way. Waiting for the window to turn over recovers, and the
+   * error's cause is logged because "fetch failed" alone hid this for a whole
+   * diagnosis.
    */
   private async getPage(url: string, attempts: number): Promise<Record<string, unknown>> {
     let backoff = 1000;
@@ -85,9 +131,17 @@ export class ListenBrainz {
         const status = e instanceof LbHttpError ? e.status : 0;
         const fatal = status >= 400 && status < 500 && status !== 429;
         if (fatal || attempt >= attempts) throw e;
-        const wait = (e instanceof LbHttpError && e.retryAfterMs) || backoff;
-        log(`listens: page failed (${String(e)}), retry ${attempt}/${attempts - 1} in ${wait}ms`);
+        const cause = (e as { cause?: { code?: string; message?: string } }).cause;
+        const wait = Math.max(
+          (e instanceof LbHttpError && e.retryAfterMs) || backoff,
+          this.rlResetInMs + 250,
+        );
+        log(
+          `listens: page failed (${String(e)}${cause?.code ? `, ${cause.code}` : ""}), ` +
+            `retry ${attempt}/${attempts - 1} in ${wait}ms`,
+        );
         await sleep(wait);
+        this.rlRemaining = Number.POSITIVE_INFINITY;
         backoff = Math.min(backoff * 2, 30_000);
       }
     }
@@ -111,25 +165,37 @@ export class ListenBrainz {
    * returns a perfectly valid prefix of the history, and the caller cannot tell
    * a quarter of an account from all of a small one. That went unnoticed here
    * for months, leaving the index holding 32k of 126k listens.
+   *
+   * `startBefore` seeds the walk somewhere other than the newest listen, which
+   * is what makes a truncated walk resumable: the caller passes the oldest
+   * listen it already holds and the next attempt continues from there. Without
+   * it every retry restarts at the top and re-fetches what it has, which is why
+   * the truncation above was not merely a failure but a permanent one.
+   *
+   * `reachedEnd` distinguishes "the account has no more listens" from "we
+   * stopped because we hit `since`". Only the former means the history is whole.
    */
   async listens(opts: {
     since?: number;
+    startBefore?: number;
     max?: number;
     attemptsPerPage?: number;
     onProgress?: (n: number) => void;
-  } = {}): Promise<{ listens: Listen[]; truncated: boolean }> {
+  } = {}): Promise<{ listens: Listen[]; truncated: boolean; reachedEnd: boolean }> {
     const since = opts.since ?? 0;
     const max = opts.max ?? Infinity;
     const attempts = opts.attemptsPerPage ?? 5;
     const out: Listen[] = [];
-    let maxTs: number | undefined;
+    let maxTs: number | undefined = opts.startBefore;
     let truncated = false;
+    let reachedEnd = false;
 
     for (let page = 0; page < 2000; page++) {
       const qs = new URLSearchParams({ count: "1000" });
       if (maxTs !== undefined) qs.set("max_ts", String(maxTs));
       let body: Record<string, unknown>;
       try {
+        await this.pace();
         body = await this.getPage(
           `${API}/user/${encodeURIComponent(this.username)}/listens?${qs}`,
           attempts,
@@ -151,7 +217,10 @@ export class ListenBrainz {
           additional_info?: { submission_client?: string };
         };
       }[];
-      if (!rows.length) break;
+      if (!rows.length) {
+        reachedEnd = true;
+        break;
+      }
 
       let oldest = Number.POSITIVE_INFINITY;
       let hitFloor = false;
@@ -180,6 +249,7 @@ export class ListenBrainz {
     return {
       listens: out.slice(0, Number.isFinite(max) ? max : undefined),
       truncated,
+      reachedEnd,
     };
   }
 }

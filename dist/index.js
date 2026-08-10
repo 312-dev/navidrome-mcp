@@ -22,6 +22,7 @@ var LbHttpError = class extends Error {
   status;
   retryAfterMs;
 };
+var RATE_LIMIT_HEADROOM = 2;
 var ListenBrainz = class {
   constructor(username, dispatcher2) {
     this.username = username;
@@ -29,10 +30,17 @@ var ListenBrainz = class {
   }
   username;
   dispatcher;
+  /** Budget from the most recent response. See RATE_LIMIT_HEADROOM. */
+  rlRemaining = Number.POSITIVE_INFINITY;
+  rlResetInMs = 0;
   async get(url) {
     const opts = { headers: { "user-agent": UA } };
     if (this.dispatcher) opts.dispatcher = this.dispatcher;
     const res = await fetch(url, opts);
+    const remaining = Number(res.headers.get("x-ratelimit-remaining"));
+    const resetIn = Number(res.headers.get("x-ratelimit-reset-in"));
+    if (Number.isFinite(remaining)) this.rlRemaining = remaining;
+    if (Number.isFinite(resetIn) && resetIn >= 0) this.rlResetInMs = resetIn * 1e3;
     if (!res.ok) {
       const after = Number(res.headers.get("retry-after") ?? 0);
       throw new LbHttpError(
@@ -44,11 +52,30 @@ var ListenBrainz = class {
     return await res.json();
   }
   /**
+   * Wait out the window when the published budget is nearly spent.
+   *
+   * Cheap by construction: at 30 requests per 5 seconds a full 127-page history
+   * costs about 20 seconds of waiting in total, against a walk that previously
+   * spent 20 seconds on a SINGLE stalled page before dying.
+   */
+  async pace() {
+    if (this.rlRemaining > RATE_LIMIT_HEADROOM || this.rlResetInMs <= 0) return;
+    await sleep(this.rlResetInMs + 250);
+    this.rlRemaining = Number.POSITIVE_INFINITY;
+  }
+  /**
    * Retry a page, honouring Retry-After when the server sends one.
    *
    * A 4xx that is not 429 is the caller's fault (a wrong username, a malformed
    * bound) and will fail identically on every attempt, so it is raised at once
    * rather than slept over.
+   *
+   * The floor of one rate-limit window matters. The failure seen in practice is
+   * a dropped socket after overrunning the budget, and retrying inside the same
+   * window just spends what is left of it: four retries at 1, 2, 4 and 8 seconds
+   * all failed that way. Waiting for the window to turn over recovers, and the
+   * error's cause is logged because "fetch failed" alone hid this for a whole
+   * diagnosis.
    */
   async getPage(url, attempts) {
     let backoff = 1e3;
@@ -59,9 +86,16 @@ var ListenBrainz = class {
         const status = e instanceof LbHttpError ? e.status : 0;
         const fatal = status >= 400 && status < 500 && status !== 429;
         if (fatal || attempt >= attempts) throw e;
-        const wait = e instanceof LbHttpError && e.retryAfterMs || backoff;
-        log(`listens: page failed (${String(e)}), retry ${attempt}/${attempts - 1} in ${wait}ms`);
+        const cause = e.cause;
+        const wait = Math.max(
+          e instanceof LbHttpError && e.retryAfterMs || backoff,
+          this.rlResetInMs + 250
+        );
+        log(
+          `listens: page failed (${String(e)}${cause?.code ? `, ${cause.code}` : ""}), retry ${attempt}/${attempts - 1} in ${wait}ms`
+        );
         await sleep(wait);
+        this.rlRemaining = Number.POSITIVE_INFINITY;
         backoff = Math.min(backoff * 2, 3e4);
       }
     }
@@ -83,19 +117,30 @@ var ListenBrainz = class {
    * returns a perfectly valid prefix of the history, and the caller cannot tell
    * a quarter of an account from all of a small one. That went unnoticed here
    * for months, leaving the index holding 32k of 126k listens.
+   *
+   * `startBefore` seeds the walk somewhere other than the newest listen, which
+   * is what makes a truncated walk resumable: the caller passes the oldest
+   * listen it already holds and the next attempt continues from there. Without
+   * it every retry restarts at the top and re-fetches what it has, which is why
+   * the truncation above was not merely a failure but a permanent one.
+   *
+   * `reachedEnd` distinguishes "the account has no more listens" from "we
+   * stopped because we hit `since`". Only the former means the history is whole.
    */
   async listens(opts = {}) {
     const since = opts.since ?? 0;
     const max = opts.max ?? Infinity;
     const attempts = opts.attemptsPerPage ?? 5;
     const out = [];
-    let maxTs;
+    let maxTs = opts.startBefore;
     let truncated = false;
+    let reachedEnd = false;
     for (let page = 0; page < 2e3; page++) {
       const qs = new URLSearchParams({ count: "1000" });
       if (maxTs !== void 0) qs.set("max_ts", String(maxTs));
       let body;
       try {
+        await this.pace();
         body = await this.getPage(
           `${API}/user/${encodeURIComponent(this.username)}/listens?${qs}`,
           attempts
@@ -107,7 +152,10 @@ var ListenBrainz = class {
       }
       const payload = body.payload;
       const rows = payload?.listens ?? [];
-      if (!rows.length) break;
+      if (!rows.length) {
+        reachedEnd = true;
+        break;
+      }
       let oldest = Number.POSITIVE_INFINITY;
       let hitFloor = false;
       for (const r of rows) {
@@ -134,7 +182,8 @@ var ListenBrainz = class {
     }
     return {
       listens: out.slice(0, Number.isFinite(max) ? max : void 0),
-      truncated
+      truncated,
+      reachedEnd
     };
   }
 };
@@ -1326,6 +1375,8 @@ var Store = class {
   playlistRuns = [];
   syncedAt = 0;
   listensSyncedAt = 0;
+  /** See Snapshot.historyComplete. Drives backfillOlder. */
+  historyComplete = false;
   trackTags = {};
   artistTags = {};
   taggedTracks = /* @__PURE__ */ new Set();
@@ -1358,8 +1409,24 @@ var Store = class {
       await this.syncLibrary();
       await this.syncListens();
       await this.saveSnapshot();
+    } else if (!this.historyComplete) {
+      void this.resumeHistoryInBackground();
     }
     if (this.opts.enrich) void this.enrichInBackground();
+  }
+  historyResuming = false;
+  async resumeHistoryInBackground() {
+    if (this.historyResuming) return;
+    this.historyResuming = true;
+    try {
+      log2(`listens: history is incomplete at ${this.listens.length}, resuming the walk`);
+      await this.syncListens();
+      await this.saveSnapshot();
+    } catch (e) {
+      log2(`listens: resume failed, will try again on next start (${String(e)})`);
+    } finally {
+      this.historyResuming = false;
+    }
   }
   // ── persistence ─────────────────────────────────────────────────────────
   async loadSnapshot() {
@@ -1369,6 +1436,7 @@ var Store = class {
       if (s.version !== SNAPSHOT_VERSION) return false;
       this.syncedAt = s.syncedAt;
       this.listensSyncedAt = s.listensSyncedAt;
+      this.historyComplete = s.historyComplete ?? false;
       this.vibes = s.vibes ?? {};
       this.trackTags = s.trackTags ?? {};
       this.artistTags = s.artistTags ?? {};
@@ -1452,6 +1520,7 @@ var Store = class {
       listenKi,
       listenClients,
       listenCli,
+      historyComplete: this.historyComplete,
       taggedTracks: [...this.taggedTracks],
       taggedArtists: [...this.taggedArtists],
       playlistRuns: this.playlistRuns.slice(-200)
@@ -1511,10 +1580,63 @@ var Store = class {
     if (/^(listenbrainz|generated daily jams|last week's jams)/i.test(p.name ?? "")) return true;
     return false;
   }
+  /**
+   * Oldest listen held, or undefined when none are.
+   *
+   * A loop rather than Math.min over a spread: this array reaches six figures,
+   * and spreading it as arguments overflows the stack.
+   */
+  oldestListen() {
+    let oldest;
+    for (const l of this.listens) if (oldest === void 0 || l.ts < oldest) oldest = l.ts;
+    return oldest;
+  }
+  /**
+   * Walk further back from the oldest listen already held.
+   *
+   * This is what makes an interrupted history recoverable. The forward pass
+   * below resumes from the NEWEST listen held, so on its own it can never
+   * retrieve anything older, and a walk that died partway left the index frozen
+   * at whatever prefix it had managed. Resuming from the oldest end instead
+   * means every sync gets strictly further back, and a failure costs a delay
+   * rather than the history.
+   */
+  async backfillOlder(floor) {
+    if (!this.lb || this.historyComplete) return 0;
+    const oldest = this.oldestListen();
+    if (oldest !== void 0 && oldest <= floor) {
+      this.historyComplete = true;
+      return 0;
+    }
+    const t0 = Date.now();
+    log2(`listens: backfilling older than ${oldest ? new Date(oldest * 1e3).toISOString().slice(0, 10) : "now"}`);
+    const { listens: older, truncated, reachedEnd } = await this.lb.listens({
+      since: floor,
+      startBefore: oldest,
+      onProgress: (n) => {
+        if (n % 5e3 === 0) {
+          log2(`listens: ${n} backfilled (${Math.round((Date.now() - t0) / 1e3)}s)`);
+        }
+      }
+    });
+    this.listens.push(...older);
+    if (!truncated) {
+      this.historyComplete = true;
+      log2(
+        `listens: history complete, ${older.length} backfilled in ${Math.round((Date.now() - t0) / 1e3)}s${reachedEnd ? " (account exhausted)" : " (reached floor)"}`
+      );
+    } else {
+      log2(
+        `listens: backfill INCOMPLETE, ${older.length} added in ${Math.round((Date.now() - t0) / 1e3)}s. The next sync resumes from here.`
+      );
+    }
+    return older.length;
+  }
   async syncListens(full = false) {
     if (!this.lb) return 0;
     const floor = Math.floor(Date.now() / 1e3) - this.opts.historyDays * 86400;
     const since = full ? floor : Math.max(this.listensSyncedAt, floor);
+    if (full) this.historyComplete = false;
     const t0 = Date.now();
     const { listens: fresh, truncated } = await this.lb.listens({
       since,
@@ -1525,10 +1647,16 @@ var Store = class {
     log2(`listens: ${fresh.length} new in ${Math.round((Date.now() - t0) / 1e3)}s`);
     if (truncated) {
       log2(
-        `listens: WARNING history is incomplete, holding ${this.listens.length + fresh.length}. Counts and "never listened" are understated until a full resync succeeds.`
+        `listens: WARNING forward pass incomplete, holding ${this.listens.length + fresh.length}.`
       );
     }
-    if (fresh.length) {
+    const backfilled = await this.backfillOlder(floor);
+    if (!this.historyComplete) {
+      log2(
+        `listens: WARNING history is still incomplete. Counts and "never listened" are understated until a later sync finishes the walk.`
+      );
+    }
+    if (fresh.length || backfilled) {
       const seen = new Set(this.listens.map((l) => `${l.ts}|${l.artist}|${l.track}`));
       for (const l of fresh) {
         const k = `${l.ts}|${l.artist}|${l.track}`;
@@ -1543,7 +1671,7 @@ var Store = class {
     }
     this.listensSyncedAt = this.listens.length ? this.listens[this.listens.length - 1].ts : 0;
     this.applyListenStats();
-    return fresh.length;
+    return fresh.length + backfilled;
   }
   // ── derivation ──────────────────────────────────────────────────────────
   build(songs) {
