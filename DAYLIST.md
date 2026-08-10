@@ -15,11 +15,11 @@ your sidebar shows a single entry whose name changes through the day:
 23:00   daylist -> "late night verse vibes"
 ```
 
-Nothing accumulates. To keep one, copy it — the next run overwrites the rolling list.
+Nothing accumulates. To keep one, copy it: the next run overwrites the rolling list.
 
 ## The prompt
 
-Paste this into a recurring Claude task (hourly, or every 2–3 hours if you'd rather it
+Paste this into a recurring Claude task (hourly, or every 2-3 hours if you'd rather it
 moved more slowly):
 
 ```
@@ -28,7 +28,7 @@ Generate my Navidrome daylist for right now.
 1. Call daylist_context. Read the vibe_fit lift values, the hour_profile, and what
    I have heard in the last few days. Note the recent daylist titles.
 
-2. Pick the vibe for THIS hour. Prefer one with lift > 1 — measured evidence I
+2. Pick the vibe for THIS hour. Prefer one with lift > 1: measured evidence I
    reach for it now. Where lift is null there is no history for that region, so
    fall back to suits_hour. If two are close, take whichever the recent daylists
    used least. get_vibe_profile shows what it holds here, and its mood_spread
@@ -37,7 +37,7 @@ Generate my Navidrome daylist for right now.
 3. Source ~25 tracks with search_tracks. Use the mood fields, NOT `vibes`:
      - mood_vibes: ["<the vibe you picked>"]
      - fits_time: "<from the context: morning / golden hour / late night / ...>"
-     - narrow it with the axes — tempo_feel and intensity above all, since two
+     - narrow it with the axes: tempo_feel and intensity above all, since two
        tracks sharing a mood word can still sound nothing alike
      - exclude_recent_daylists: 6     (so this is not a rerun)
      - max_per_artist: 2              (so it doesn't collapse onto one artist)
@@ -51,7 +51,7 @@ Generate my Navidrome daylist for right now.
    the same artist back to back, and never a sparse acoustic track next to a dense
    loud one however well they match on mood.
 
-5. Name it like Spotify names a daylist — lowercase, 2-4 words, concrete and
+5. Name it like Spotify names a daylist: lowercase, 2-4 words, concrete and
    evocative of the time and feel rather than the genre. Do not reuse a recent title.
 
 6. Publish with commit_daylist (title, ordered track_ids, one-line description).
@@ -68,7 +68,7 @@ can invoke that instead of pasting the above.
 The generator does not guess what "6pm on a Thursday" sounds like. It measures it.
 
 **`daylist_context`** reports, for the current hour, which vibe regions you actually reach
-for — scored as **lift**, not raw count. Lift asks "does this region appear more than its
+for, scored as **lift**, not raw count. Lift asks "does this region appear more than its
 own average at this hour?" Raw counts would just rank regions by size, and the biggest one
 would win every hour.
 
@@ -100,7 +100,7 @@ work on the next pass.
 | Tighter flow | Narrow `tempo_feel`, e.g. `["slow","mid"]` |
 | More discovery | Raise `not_listened_within_days`, or add `added_within_days: 60` |
 | Longer sets | Ask for 40 tracks; ~25 is about 90 minutes |
-| A different clock | Set `NAVIDROME_TZ` — all time-of-day analysis keys off it |
+| A different clock | Set `NAVIDROME_TZ`: all time-of-day analysis keys off it |
 
 ## Caveats worth knowing
 

@@ -193,7 +193,7 @@ const searchShape = {
     .array(z.string())
     .optional()
     .describe(
-      "Restrict to tracks the listener filed onto these named playlists by hand. Most libraries have few or none — prefer `mood_vibes`.",
+      "Restrict to tracks the listener filed onto these named playlists by hand. Most libraries have few or none: prefer `mood_vibes`.",
     ),
   exclude_vibes: z.array(z.string()).optional(),
   year_min: z.number().int().optional(),
@@ -296,7 +296,7 @@ server.registerTool(
     description:
       "The main query tool, over the WHOLE library. Every filter composes: real year/date ranges, play and listen recency, the seven mood axes (energy, valence, intensity, acousticness, density, tempo_feel, vocal), mood descriptors, vibe regions, Last.fm tags, duration, time-of-day fit, plus per-artist diversity caps and personal-affinity ranking.\n\n" +
       "For mood requests use `mood_vibes` / `moods` / the axis ranges. `vibes` is a different thing: it matches only tracks filed onto a named playlist by hand, which many libraries have none of.\n\n" +
-      "The mood filters need the labelling pass — check `mood_coverage` in describe_library before relying on them.",
+      "The mood filters need the labelling pass: check `mood_coverage` in describe_library before relying on them.",
     inputSchema: searchShape,
     annotations: { readOnlyHint: true },
   },
@@ -419,7 +419,7 @@ server.registerTool(
   {
     title: "Find similar tracks in the library",
     description:
-      "Expand from seed tracks or artists. Combines Navidrome's agent-backed similarity (Last.fm/Deezer/ListenBrainz) with co-occurrence in the listener's own playlists, where those exist — tracks repeatedly filed alongside the seed. Results are restricted to what is actually in the library.",
+      "Expand from seed tracks or artists. Combines Navidrome's agent-backed similarity (Last.fm/Deezer/ListenBrainz) with co-occurrence in the listener's own playlists, where those exist: tracks repeatedly filed alongside the seed. Results are restricted to what is actually in the library.",
     inputSchema: {
       track_ids: z.array(z.string()).optional().describe("Seed track ids."),
       artists: z.array(z.string()).optional().describe("Seed artist names."),
@@ -506,7 +506,7 @@ server.registerTool(
   {
     title: "Analyse listening history",
     description:
-      "Query the ListenBrainz history: recent plays, top artists/tracks over a window, hour-of-day and weekday habits, rising/falling trends, and long-loved-but-forgotten tracks worth resurfacing. This is the only source of timestamped history — Navidrome itself keeps only a play count and a last-played time.",
+      "Query the ListenBrainz history: recent plays, top artists/tracks over a window, hour-of-day and weekday habits, rising/falling trends, and long-loved-but-forgotten tracks worth resurfacing. This is the only source of timestamped history: Navidrome itself keeps only a play count and a last-played time.",
     inputSchema: {
       mode: z
         .enum(["recent", "top", "by_hour", "by_weekday", "rediscover", "trending"])
@@ -769,13 +769,13 @@ server.registerTool(
   {
     title: "Create a smart (self-updating) playlist",
     description:
-      "Create a playlist defined by RULES rather than a fixed track list. Navidrome re-evaluates it continuously, so it stays current without regeneration — ideal for standing playlists like '90s rock I haven't played in a year'.\n\n" +
+      "Create a playlist defined by RULES rather than a fixed track list. Navidrome re-evaluates it continuously, so it stays current without regeneration: ideal for standing playlists like '90s rock I haven't played in a year'.\n\n" +
       "Rules are Navidrome's native criteria format:\n" +
       '{"all":[{"is":{"genre":"Rock"}},{"inTheRange":{"year":[1990,1999]}},{"notInTheLast":{"lastPlayed":365}}],"sort":"playCount","order":"desc","limit":100}\n\n' +
       "Operators: is, isNot, gt, lt, contains, notContains, startsWith, endsWith, inTheRange, before, after, inTheLast, notInTheLast. " +
       "Combine with all (AND) / any (OR), which may nest. " +
       "Fields include: title, album, artist, albumartist, genre, year, dateadded, datemodified, lastplayed, playcount, rating, starred, loved, comment, bpm, length, filepath, filetype.\n\n" +
-      "Note: rules operate on Navidrome's own fields only — ListenBrainz listen counts and Last.fm tags are NOT available here. For those, use search_tracks plus create_playlist.",
+      "Note: rules operate on Navidrome's own fields only; ListenBrainz listen counts and Last.fm tags are NOT available here. For those, use search_tracks plus create_playlist.",
     inputSchema: {
       name: z.string(),
       rules: z.record(z.any()).describe("Navidrome smart-playlist criteria object."),
@@ -904,7 +904,7 @@ server.registerTool(
         .map((i) => store.byId.get(i)?.duration ?? 0)
         .reduce((a, b) => a + b, 0);
       return result(
-        `Daylist published as "${title}" — ${written} tracks, ${fmtDuration(dur)}.` +
+        `Daylist published as "${title}": ${written} tracks, ${fmtDuration(dur)}.` +
           (created ? " (created the rolling playlist)" : ""),
         { playlist_id: id, title, tracks: written, duration: fmtDuration(dur) },
       );
@@ -985,7 +985,7 @@ server.registerPrompt(
             "1. Call `daylist_context`. Read vibe_fit, the hour_profile, and what I have heard in the",
             "   last few days. Note the titles of recent daylists.",
             "",
-            "2. Pick the vibe for THIS hour. Prefer one with lift > 1 — that is measured evidence I",
+            "2. Pick the vibe for THIS hour. Prefer one with lift > 1: that is measured evidence I",
             "   really do reach for it now. Where lift is null there is no history for that region, so",
             "   fall back to `suits_hour`. If two are close, take the one the recent daylists have used",
             "   least. Call `get_vibe_profile` to hear what that region actually contains here, and",
@@ -1001,7 +1001,7 @@ server.registerPrompt(
             "     - pass `hour_of_day` from the context and leave sort on `affinity`",
             "     - over-fetch (limit ~60) and then choose the final set yourself for flow",
             "   Mix roughly 70% things I clearly love with 30% that are either long-unheard",
-            "   (`not_listened_within_days`) or recently added — a daylist that only replays this",
+            "   (`not_listened_within_days`) or recently added: a daylist that only replays this",
             "   week's rotation is boring.",
             "",
             "4. Sequence them deliberately: open with something that lands immediately, keep the energy",
@@ -1009,7 +1009,7 @@ server.registerPrompt(
             "   a sparse acoustic track next to a dense loud one however well they match on mood.",
             "",
             "5. Name it the way Spotify names a daylist: lowercase, 2-4 words, concrete and a little",
-            "   specific, evoking the time and feel rather than the genre — e.g. 'golden hour synth cruise',",
+            "   specific, evoking the time and feel rather than the genre, e.g. 'golden hour synth cruise',",
             "   'slow shreds tuesday haze', 'late night verse vibes'. Do not reuse a recent title.",
             "",
             "6. Publish with `commit_daylist`, passing the title, the ordered track_ids, and a one-line",

@@ -9,8 +9,9 @@
  * Tags are the right carrier rather than a private cache: they survive this
  * server being redeployed or deleted, and Music Assistant, Navidrome's own smart
  * playlists and every Subsonic client can read the same values. The cost is that
- * the numeric ones must be registered in Navidrome's `mappings.yaml` before they
- * are queryable server-side, which the plugin documents.
+ * the numeric ones must be declared under `Tags` in Navidrome's own config file,
+ * with `Type = "int"`, before they are queryable server-side, which the plugin
+ * documents.
  */
 
 import {
@@ -140,7 +141,8 @@ export function moodDiagnosis(total: number, labelled: number, anyMoodTag: boole
     "Mood tags are present but none parsed into a complete label. The numeric axes " +
     `(${TAGS.energy}, ${TAGS.valence}, ${TAGS.intensity}, ${TAGS.acousticness}, ` +
     `${TAGS.density}) plus ${TAGS.tempo} and ${TAGS.vocal} are all required. The usual ` +
-    "cause is that Navidrome's mappings.yaml does not register them, so it indexes the " +
-    "MOOD words and drops the rest."
+    "cause is that these tags are not declared under `Tags` in Navidrome's own config " +
+    "file (not `mappings.yaml`, which is embedded in the binary and cannot be edited), " +
+    "so the scanner drops them and only the built-in MOOD words survive."
   );
 }

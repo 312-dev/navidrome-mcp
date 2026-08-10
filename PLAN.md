@@ -29,7 +29,7 @@ writes tags into the audio files, and that is useful with no connector anywhere
 in the picture: Navidrome's own smart playlists filter on those tags, Music
 Assistant reads them, so does every Subsonic client. It knows nothing about MCP.
 
-The connector is a pure consumer. It carries **no enrichment logic at all** — no
+The connector is a pure consumer. It carries **no enrichment logic at all**: no
 LLM client, no API key, no labelling prompt, no vocabulary derivation. If you
 want mood-aware playlists, you install the plugin; if the plugin is not
 installed, the connector says so plainly and its non-mood tools keep working.
@@ -60,9 +60,10 @@ input. It keeps no anchors, no radii, and no way to produce a label.
 ## Static playlists are the default
 
 Navidrome's smart playlists (NSP) can express a *box* in mood-space but not a
-sphere, not per-artist diversity caps, and not ordering — which is most of the
-way back to the problem this whole design exists to fix. They also require an
-edit to Navidrome's `mappings.yaml` to register numeric tags.
+sphere, not per-artist diversity caps, and not ordering, which is most of the
+way back to the problem this whole design exists to fix. They also require
+declaring numeric tags under `Tags` in Navidrome's own config file, since
+nothing does that by default.
 
 So: **static by default.** `refresh: "smart"` stays in the spec as a documented
 power-user path for standing collections ("everything calm and acoustic") where
@@ -70,9 +71,9 @@ order does not matter and the set should grow with the library.
 
 The heuristic: *"a playlist for X"* is static; *"all my Y"* is smart.
 
-## Phase 0 — Portability pass ✅ done 2026-08-09
+## Phase 0: Portability pass ✅ done 2026-08-09
 
-- [x] `mood.ts` — the labelling prompt is built from `MOOD_ANCHORS` (coordinates
+- [x] `mood.ts`: the labelling prompt is built from `MOOD_ANCHORS` (coordinates
       + glosses), not from anyone's playlists. `vibes` dropped from the model's
       output entirely, and `moods` is now a schema `enum` so an off-vocabulary
       term is not a thing the model can return.
@@ -80,13 +81,13 @@ The heuristic: *"a playlist for X"* is static; *"all my Y"* is smart.
       `vocal` added, `organic` gone, `Mood extends MoodPoint`. Snapshot version
       4 → 5, so v1 labels are discarded rather than migrated (three of the axes
       were never measured).
-- [x] `daylist.ts` — `vibeFits` iterates `UNIVERSAL_VIBES`. Lift where history
+- [x] `daylist.ts`: `vibeFits` iterates `UNIVERSAL_VIBES`. Lift where history
       exists, the region's own `hours` where it does not, and every region is
       reported so an unlabelled library says so instead of returning nothing.
-- [x] `index.ts` — `vibe_regions` replaces `curated_vibes`; `get_vibe_profile`
+- [x] `index.ts`: `vibe_regions` replaces `curated_vibes`; `get_vibe_profile`
       resolves a region *or* a playlist and reports the library's own centroid
       and spread for it; tool descriptions no longer quote one library's counts.
-- [x] `query.ts` — `mood_vibes` matches computed membership; `moods` folds
+- [x] `query.ts`: `mood_vibes` matches computed membership; `moods` folds
       synonyms so a caller asking for "chill" gets `mellow`; the curated-playlist
       affinity bonus survives as a term that contributes zero when absent.
 - [x] **`src/propagate.ts` deleted** (140 lines). It trained a nearest-centroid
@@ -94,7 +95,7 @@ The heuristic: *"a playlist for X"* is static; *"all my Y"* is smart.
       available. Membership is now a measurement.
 - [x] `scripts/check-vocabulary.ts` + `npm run check:vocab`.
 
-**Exit met:** every remaining `store.vibes` read is optional enrichment — the
+**Exit met:** every remaining `store.vibes` read is optional enrichment: the
 explicit `vibes` filter, the affinity bonus, `similar_tracks` co-occurrence, the
 `curated_playlists` block, and persistence.
 
@@ -102,7 +103,7 @@ explicit `vibes` filter, the affinity bonus, `similar_tracks` co-occurrence, the
 
 **`src/store.ts` was invisible to grep.** It used a literal NUL as a string
 separator, written as the raw byte rather than an escape, so `file` classed it as
-`data` and plain `grep` skipped it *silently* — no match, no warning, exit 0.
+`data` and plain `grep` skipped it *silently*: no match, no warning, exit 0.
 That is why this plan's original call-site list missed 15 sites in that file,
 including the `propagateVibes` wiring. Both occurrences are now `\u0000` escapes
 and the file is ordinary text again. Worth remembering as a class of bug: a
@@ -111,14 +112,14 @@ search that reports success while searching nothing.
 **The vibe radii were wrong.** Guessed by eye last session; measured against a
 uniform sample of mood-space, `driving` covered 46% of it and a typical point
 fell in 3.9 regions. Retuned to ~7% each. Separately, no radius could keep `warm`
-(valence 66) out of `melancholy` (valence 24) — a mean over five axes cannot
-enforce a requirement on one — so affect-named regions now carry a valence bound
+(valence 66) out of `melancholy` (valence 24), a mean over five axes cannot
+enforce a requirement on one, so affect-named regions now carry a valence bound
 alongside the existing tempo/vocal ones. Both are recorded in `DESIGN-mood-v2.md`
 and asserted by `check:vocab`.
 
-## Phase 1 — Connector stops enriching ✅ done 2026-08-09 (`d458b8c`)
+## Phase 1: Connector stops enriching ✅ done 2026-08-09 (`d458b8c`)
 
-- [x] **`src/mood.ts` deleted** (519 lines) — `MoodEnricher`, the Anthropic
+- [x] **`src/mood.ts` deleted** (519 lines): `MoodEnricher`, the Anthropic
       client, batching, the Batch API path, cost tracking, prompt and schema
 - [x] `@anthropic-ai/sdk` dropped from `package.json` and the lockfile;
       `NAVIDROME_ANTHROPIC_KEY` / `ANTHROPIC_API_KEY` removed from the code and
@@ -126,12 +127,12 @@ and asserted by `check:vocab`.
       the gateway repo**)
 - [x] Anchors and region geometry moved out. `src/vocabulary.ts` is now a
       consumer's subset: term list, synonyms, and a region→`hours` table
-- [x] `src/moodtags.ts` — new, reads `Mood` out of `NdSong.tags`. All-or-nothing
+- [x] `src/moodtags.ts`: new, reads `Mood` out of `NdSong.tags`. All-or-nothing
       on the five axes plus tempo and vocal
 - [x] Snapshot version 5 → 6; the `moods` map is gone from the snapshot entirely
 - [x] `enrich_moods` → `mood_coverage`, which reports *why* a library has no
-      moods (never installed / ran but wrote nothing / missing from
-      `mappings.yaml`) rather than only that it has none
+      moods (never installed / ran but wrote nothing / not declared in
+      Navidrome's config) rather than only that it has none
 - [x] `check:vocab` rewritten for what this side still owns. It caught that hours
       4 and 5 belonged to no region, so a fresh install had nothing to suggest at
       4am; `late night` and `slow morning` were extended to cover them.
@@ -147,7 +148,7 @@ must write exactly these. Changing one is a breaking change across two repos.
 | Tag | Kind | Notes |
 |---|---|---|
 | `mood` | multi | 2-4 vocabulary terms. Standard Vorbis/ID3 field, mapped by Navidrome already |
-| `moodenergy` `moodvalence` `moodintensity` `moodacousticness` `mooddensity` | numeric 0-100 | Need `mappings.yaml` registration to be queryable server-side |
+| `moodenergy` `moodvalence` `moodintensity` `moodacousticness` `mooddensity` | numeric 0-100 | Need declaring under `Tags` in Navidrome's config to be queryable server-side |
 | `moodtempo` | enum | `still\|slow\|mid\|driving\|frantic` |
 | `moodvocal` | enum | `instrumental\|sung\|rapped\|mixed` |
 | `moodtime` | multi | time-of-day slots |
@@ -162,34 +163,35 @@ them. `navidrome-moodspace` is the leading alternative -- it names the coordinat
 system rather than the word list, and still contains "mood" for discoverability.
 Undecided; rename before publishing a remote, not after.
 
-## Phase 2 — Plugin becomes the enrichment authority
+## Phase 2: Plugin becomes the enrichment authority
 
 - [ ] Port the 52 anchored terms, 146 synonyms and 14 regions into Go as the
-      canonical vocabulary. **The existing 60 words were selected by frequency** —
-      the source comments read "high frequency (300+)" — so they kept
+      canonical vocabulary. **The existing 60 words were selected by frequency**
+      (the source comments read "high frequency (300+)"), so they kept
       `nostalgic`, `cinematic`, `raw`, `hypnotic`, `rowdy`, every word measured
       as spanning the whole space.
 - [ ] Rebuild `internal/prompt` from anchors and glosses. It currently opens
       "The listener has hand-curated playlists that ARE his mood vocabulary" and
-      samples tracks from them — the same defect the connector just shed.
+      samples tracks from them, the same defect the connector just shed.
 - [ ] Schema v2: add `density`, `tempo_feel`, `vocal`; rename `organic` →
       `acousticness`
 - [ ] Write the numeric axes, `tempo`, `vocal` and `vibe` as tags, not only
       `MOOD` words. Today it calls `WriteMood(path, canonical)` and nothing else,
       so the cohesion engine would have nothing to measure.
-- [ ] Ship a `mappings.yaml` snippet and a README covering standalone use —
-      numeric tags need registering via `criteria.AddNumericTags()` before a
-      smart playlist can filter on them
+- [ ] Ship a `Tags` config snippet and a README covering standalone use:
+      each tag needs a `[Tags.<name>]` entry in Navidrome's own config file,
+      with `Type = "int"` on the numeric axes, before a smart playlist can
+      filter on them
 - [ ] Fix the manifest: it promises "keeps natural-language playlists refreshed
       on a schedule" and no such code exists
 - [ ] Drop the Subsonic playlist-reading permission if the prompt no longer
-      needs it — a smaller permission surface is part of standing alone
+      needs it: a smaller permission surface is part of standing alone
 - [ ] Sweep the plugin's comments/docs for drift (hard rule)
 
 **Exit:** a sample run writes real tags visible in `/api/tag`, `mood=*` returns
 non-zero, and a Navidrome smart playlist filters on one of the numeric axes.
 
-## Phase 3 — Relabel and join the halves
+## Phase 3: Relabel and join the halves
 
 - [ ] `dryRun: false`, `run: everything`, provider/model set
 - [ ] Confirm the preflight estimate before committing
@@ -202,42 +204,42 @@ non-zero, and a Navidrome smart playlist filters on one of the numeric axes.
 - [ ] Re-measure the vibe radii against the real labelled library. They are
       calibrated to ~7% of a *uniform* sample of mood-space, and real collections
       cluster centrally.
-- [ ] **`aestheticProfile(hourBucket, weekdayType, windowDays)`** — optional.
+- [ ] **`aestheticProfile(hourBucket, weekdayType, windowDays)`**: optional.
       Where listening history exists, project listens onto mood points and bucket
       by hour to get a measured centroid. Where it does not, fall back to each
       vibe's `hours` affinity. History is the user's choice to connect.
 
-**Cost:** ~$5.50 on Sonnet 5 — `batchMode: true` is already on, which is the
+**Cost:** ~$5.50 on Sonnet 5: `batchMode: true` is already on, which is the
 50% Batch API discount. Intro pricing ends **2026-08-31**. Derived from the
 measured v1 run: 876,734 output tokens for 9,193 tracks. `maxSpendUsd: 25` and
 `lifetimeCapUsd: 100` both cover it.
 
 ⚠️ `dryRun` costs full price. It protects files, not the bill.
 
-**Exit:** the v1 failures are the regression test — a `tender` query must stop
+**Exit:** the v1 failures are the regression test: a `tender` query must stop
 returning Debussy and Metallica together, and `flowScore` on a cohesion set must
 beat the same-size set filtered by mood word alone.
 
-## Phase 4 — Prompt to playlist
+## Phase 4: Prompt to playlist
 
 The general capability. A `PlaylistSpec` carries: region (centre + radius),
 filters, history constraints, diversity caps, size, sequencing arc, refresh mode.
 
 | Step | How |
 |---|---|
-| Prompt → spec | one model call — parsing novel intent is the real job for an LLM |
+| Prompt → spec | one model call: parsing novel intent is the real job for an LLM |
 | Select | constrained sampling within the region, diversity caps, rotation exclusion |
-| Sequence | `sequence()` — greedy nearest-neighbour along an energy arc |
+| Sequence | `sequence()`: greedy nearest-neighbour along an energy arc |
 | Name | template, or a ~200-token call |
 | Commit | write the playlist |
 
 - [ ] `create_playlist_from_prompt` implementing the above
-- [ ] Daylist as a scheduled preset — spec derived from the hour, no prompt
+- [ ] Daylist as a scheduled preset: spec derived from the hour, no prompt
 - [ ] `refresh: "smart"` back-end (NSP rules) as a later add-on
 
-## Phase 5 — Ship
+## Phase 5: Ship
 
-Verified 2026-08-09. The hostname is **`navidrome-mcp.graysons.network`** —
+Verified 2026-08-09. The hostname is **`navidrome-mcp.graysons.network`**:
 commit `724e5fa` renamed it from `navidrome.`
 
 - [x] Worker deployed (2026-08-04 21:50 UTC), routing `navidrome-mcp`
@@ -245,7 +247,7 @@ commit `724e5fa` renamed it from `navidrome.`
 - [x] Live probe returns 403, matching the known-good `xbox` connector
 - [x] Orphaned `navidrome.graysons.network/*` route deleted
 - [x] Added to Claude Code as MCP server `navidrome` (user scope)
-- [ ] **Complete the OAuth login** — run `/mcp`, pick `navidrome`. Currently
+- [ ] **Complete the OAuth login**: run `/mcp`, pick `navidrome`. Currently
       "Needs authentication". This also proves the worker→backend round trip,
       which the 2026-08-06 audit flagged as never verified end to end.
 - [ ] Recurring task for the daylist preset
@@ -254,11 +256,11 @@ Known drift, harmless: the live worker predates `bf8b34e` and `0a401b9`, so its
 `BACKENDS` still lists sophtron / spotify / todoist / wrongcard. Their DNS is
 gone. The next worker change carries the sync.
 
-## Phase 6 — Hygiene
+## Phase 6: Hygiene
 
 - [ ] **`navidrome-mood` has no git remote.** 15 commits of Go and the built
       `.ndp` exist only on this laptop. The one item where delay risks real loss.
-- [ ] Reissue `op://Dev/Cloudflare API Token: Worker Editor` — it is invalid
+- [ ] Reissue `op://Dev/Cloudflare API Token: Worker Editor`: it is invalid
       (`code 1000`), which is why Cloudflare work currently needs the Production
       global key. Scopes: Workers Scripts:Edit, Workers Routes:Edit (zone
       graysons.network), Workers KV:Read, Account Settings:Read, Access Apps:Edit.
@@ -269,10 +271,10 @@ gone. The next worker change carries the sync.
 
 **Navidrome is down.** The Mini answers on the tailnet (`100.93.15.8`) but
 `:4533` refuses connections, which is also why the connector's port 8012 probes
-`000`. No shell access to the Mini from here. Phases 1–3 need it back.
+`000`. No shell access to the Mini from here. Phases 1-3 need it back.
 
 ## Sequencing
 
-Phase 0 is done. 1–2 gate 3–4: the connector cannot read tags that do not exist,
+Phase 0 is done. 1-2 gate 3-4: the connector cannot read tags that do not exist,
 and cohesion cannot be evaluated without the v2 axes. Phase 5's remaining item is
 independent. Phase 6 should not wait.

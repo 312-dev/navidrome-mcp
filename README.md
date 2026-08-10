@@ -1,7 +1,7 @@
 # navidrome-mcp
 
 An MCP server for [Navidrome](https://www.navidrome.org/) that builds playlists which
-actually match a described mood — grounded in what you own, what you have listened to,
+actually match a described mood, grounded in what you own, what you have listened to,
 and how you yourself have labelled your music.
 
 ## Why this exists
@@ -16,7 +16,7 @@ Navidrome's API alone cannot do this, for three concrete reasons:
 3. **Nothing in the library says how a track *feels*.** Measured on a real 9,311-track
    library: 32 genres with Rock alone covering 47%, BPM present on **24 tracks (0.3%)**,
    ReplayGain on 222 (2%), MusicBrainz recording IDs on 222 (2%). That last number also
-   rules out AcousticBrainz as a primary mood source — its audio-derived mood models are
+   rules out AcousticBrainz as a primary mood source: its audio-derived mood models are
    keyed by MBID, and resolving the rest via ISRC → MusicBrainz (rate-limited to 1 req/s)
    would still only reach ~23% of the library.
 
@@ -25,11 +25,11 @@ So this server maintains its own index and joins three sources:
 | Source | Provides |
 |---|---|
 | Navidrome (native + Subsonic APIs) | Authoritative metadata, similarity agents, the playlist write path |
-| ListenBrainz | Timestamped listen history — time-of-day and weekday habits |
+| ListenBrainz | Timestamped listen history: time-of-day and weekday habits |
 | Last.fm | A real descriptive tag vocabulary (`nu-disco`, `melancholy`, `shoegaze`) |
 
 Only the first is required. Listen history, Last.fm tags and your own playlists each improve
-ranking and time-of-day fit where they exist, and none of them is load-bearing — the same
+ranking and time-of-day fit where they exist, and none of them is load-bearing: the same
 query means the same thing in a library that has none of them.
 
 ## Where mood comes from
@@ -41,7 +41,7 @@ server reads those tags and does everything downstream: filtering, cohesion, seq
 playlist writing.
 
 The split is deliberate and one-directional. The plugin never calls this server and is
-useful without it — its tags drive Navidrome's own smart playlists, and Music Assistant
+useful without it: its tags drive Navidrome's own smart playlists, and Music Assistant
 and every Subsonic client can read them too. This server depends on the plugin only for
 mood; install it if you want mood-aware playlists, skip it and everything else still
 works.
@@ -61,12 +61,12 @@ collection instead would bake that collection's shape into them: a rock-heavy li
 `riffy` and `bass-heavy`, which say nothing useful about a jazz one.
 
 Words alone cannot carry cohesion, which is why the axes exist. Measured on a real library,
-`tender` covered both Debussy's *Suite bergamasque* and Metallica's *Nothing Else Matters* —
+`tender` covered both Debussy's *Suite bergamasque* and Metallica's *Nothing Else Matters*:
 both labels correct, and useless as a playlist filter. Distance in mood-space separates them.
 
 Call `mood_coverage` to see how much of a library is labelled. When the answer is none it
-says which of the three causes applies — plugin never run, plugin ran but wrote nothing, or
-tags written but not registered in Navidrome's `mappings.yaml` — because those need
+says which of the three causes applies (plugin never run, plugin ran but wrote nothing, or
+tags written but not declared in Navidrome's own config file) because those need
 different fixes and all three otherwise read as an empty library.
 
 ## Design notes
@@ -79,7 +79,7 @@ different fixes and all three otherwise read as an empty library.
   unreadable the server just re-syncs.
 - **Navidrome's own compound engine is still exposed** via `create_smart_playlist`, for
   standing playlists that should keep re-evaluating server-side. Note those rules can
-  only see Navidrome's own fields — not ListenBrainz listens or Last.fm tags.
+  only see Navidrome's own fields, not ListenBrainz listens or Last.fm tags.
 - **`npm run check:vocab`** asserts what typechecking cannot about this side's copy of the
   vocabulary: every synonym resolves and is reachable, no term or region name contains a
   character Navidrome splits tag values on, and every hour of the day is claimed by some
@@ -91,7 +91,7 @@ different fixes and all three otherwise read as an empty library.
 |---|---|
 | `describe_library` | Orientation: size, genres, decades, vibe regions, tag vocabulary |
 | `mood_coverage` | How much of the library is labelled, and what to fix when none of it is |
-| `search_tracks` | The workhorse — full compound filtering, diversity caps, affinity ranking |
+| `search_tracks` | The workhorse: full compound filtering, diversity caps, affinity ranking |
 | `get_vibe_profile` | What a vibe actually consists of in *this* library, and how tightly it clusters |
 | `similar_tracks` | Expand from seeds via agents + playlist co-occurrence |
 | `listening_history` | recent / top / by_hour / by_weekday / rediscover / trending |
@@ -102,7 +102,7 @@ different fixes and all three otherwise read as an empty library.
 | `commit_daylist` | Publish the rolling daylist atomically |
 | `refresh_index` | Re-sync from Navidrome / ListenBrainz |
 
-Prompt: **`daylist`** — generates a Spotify-style daylist for the current hour.
+Prompt: **`daylist`** - generates a Spotify-style daylist for the current hour.
 
 ## Configuration
 

@@ -475,8 +475,8 @@ export class Store {
    *
    * Reports *why* when the answer is none. "0 labelled" reads identically
    * whether the plugin was never installed, ran but wrote nothing, or wrote tags
-   * Navidrome then dropped for want of a mappings.yaml entry -- and those need
-   * three different fixes.
+   * Navidrome then dropped for want of a `Tags` entry in its own config -- and
+   * those need three different fixes.
    */
   moodCoverage(): { labelled: number; total: number; note: string } {
     const labelled = this.tracks.filter((t) => t.mood).length;

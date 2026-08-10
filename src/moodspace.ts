@@ -10,7 +10,7 @@
  *   anthemic    The Beatles, All You Need   I30 V80   <->  Slipknot, Unsainted              I95 V30
  *
  * Each label is correct. "Tender" describes emotional content, and content is
- * genre-independent — so it is a fine thing to search for and a terrible thing
+ * genre-independent, so it is a fine thing to search for and a terrible thing
  * to sequence by. Cohesion has to come from the sonic axes instead.
  */
 
@@ -18,7 +18,7 @@ import type { MoodTerm } from "./vocabulary.js";
 
 /**
  * The five continuous axes. Split out from `MoodPoint` because the things a
- * region is defined by — a term's anchor, a vibe's centre — have coordinates but
+ * region is defined by (a term's anchor, a vibe's centre) have coordinates but
  * no tempo, vocal or descriptors of their own.
  */
 export interface MoodAxes {
@@ -77,11 +77,11 @@ export interface Mood extends MoodPoint {
  * The weights are not uniform, and the two interesting ones are:
  *
  *   - `valence` is CHEAP. A sad song and a happy song sit together fine if they
- *     sound alike — a melancholy folk tune next to a joyful folk tune is a good
+ *     sound alike: a melancholy folk tune next to a joyful folk tune is a good
  *     transition. Weighting valence heavily is what makes a playlist emotionally
  *     monotonous, which is a different failure from the one we are fixing.
  *   - `intensity` and `acousticness` are EXPENSIVE, because together they are the
- *     Debussy/Metallica axis — the actual observed failure.
+ *     Debussy/Metallica axis, the actual observed failure.
  */
 const W = {
   intensity: 1.6,
@@ -123,7 +123,7 @@ function vocalCost(a: VocalKind, b: VocalKind): number {
  * This is the measure a *region* is defined against: a term's anchor and a
  * vibe's centre are coordinates, so "is this track in that region" cannot ask
  * about tempo or vocal, which the region does not have. Those are handled
- * separately — as membership constraints for a vibe, and as transition
+ * separately: as membership constraints for a vibe, and as transition
  * penalties between two real tracks.
  */
 export function numericDistance(a: MoodAxes, b: MoodAxes): number {
@@ -150,7 +150,7 @@ export function moodDistance(a: MoodPoint, b: MoodPoint): number {
   return numericDistance(a, b) + tempo + vocalCost(a.vocal, b.vocal);
 }
 
-/** Centroid of a set — the "region" a vibe occupies. */
+/** Centroid of a set: the "region" a vibe occupies. */
 export function centroid(points: MoodPoint[]): MoodPoint | null {
   if (!points.length) return null;
   const mean = (f: (p: MoodPoint) => number) =>
@@ -177,7 +177,7 @@ export function centroid(points: MoodPoint[]): MoodPoint | null {
 }
 
 /**
- * Radius covering a given share of a set — the natural cohesion radius for a
+ * Radius covering a given share of a set: the natural cohesion radius for a
  * vibe, computed at index time rather than guessed at query time.
  */
 export function spreadRadius(points: MoodPoint[], quantile = 0.75): number {
@@ -193,7 +193,7 @@ export function spreadRadius(points: MoodPoint[], quantile = 0.75): number {
  * Two things are in tension: minimising transition cost pulls toward a flat,
  * samey run, while an energy arc gives the list a shape. So the cost is
  * transition distance plus a penalty for deviating from the target energy at
- * that position — greedy nearest-neighbour under the combined cost.
+ * that position: greedy nearest-neighbour under the combined cost.
  *
  * Greedy rather than optimal on purpose: this is a ~25-item ordering where a
  * good answer now beats a perfect one, and exact TSP buys nothing a listener
@@ -252,7 +252,7 @@ export function sequence(
   return out;
 }
 
-/** Mean transition cost — a single number for how well a list flows. */
+/** Mean transition cost: a single number for how well a list flows. */
 export function flowScore(ordered: { mood: MoodPoint }[]): number {
   if (ordered.length < 2) return 0;
   let total = 0;

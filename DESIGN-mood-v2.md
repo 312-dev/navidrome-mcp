@@ -1,4 +1,4 @@
-# Mood schema v2 — designing for cohesion
+# Mood schema v2: designing for cohesion
 
 ## The problem, measured
 
@@ -10,7 +10,7 @@ tracks. 33% used exactly once, 61% used five times or fewer, 83% used ≤25 time
 Only 183 words are frequent enough to filter on at all.
 
 **Mood words are semantic, not sonic.** "Tender" describes emotional content, and
-content is genre-independent — so it legitimately covers both Debussy's *Suite
+content is genre-independent, so it legitimately covers both Debussy's *Suite
 bergamasque* (`I8 O95`) and Metallica's *Nothing Else Matters* (`I55 O60`). The
 label is right. Using it as a playlist filter is wrong. Measured worst cases:
 
@@ -22,14 +22,14 @@ label is right. Using it as a playlist filter is wrong. Measured worst cases:
 | `haunting` | Willie Watson, cowboy folk | The Cranberries, *Zombie* | 60 |
 
 **Genre can't fix it.** Rock is 47% of the library, so it dominates every mood
-word — `warm` is 392/758 Rock, `anthemic` 483/615. Filtering by genre barely
+word: `warm` is 392/758 Rock, `anthemic` 483/615. Filtering by genre barely
 narrows anything.
 
 ## What the data said, and what it means
 
 > **Superseded in part, 2026-08-09.** The measurements below are why the design
 > uses anchors; they are no longer the *source* of the vocabulary. Deriving terms
-> from one library bakes that library's shape into them — a rock-heavy collection
+> from one library bakes that library's shape into them: a rock-heavy collection
 > yields `riffy` and `bass-heavy`, which say nothing useful about a jazz one. The
 > shipped vocabulary in `src/vocabulary.ts` is 52 terms **defined** by explicit
 > anchors in mood-space, covering the space rather than a sample of it, organised
@@ -39,7 +39,7 @@ narrows anything.
 Scoring every word used ≥20 times by the spread of its tracks across
 intensity/acousticness/valence separates them cleanly:
 
-| Tight (spread 5–8) | Loose (spread 15–18) |
+| Tight (spread 5-8) | Loose (spread 15-18) |
 |---|---|
 | `pastoral`, `club-ready`, `angry`, `furious`, `banging`, `pounding`, `bass-heavy`, `hard-hitting`, `swinging` | `raw`, `cinematic`, `bleak`, `hypnotic`, `rowdy`, `nostalgic`, `spacious`, `theatrical`, `cathartic`, `lush`, `desolate`, `stomping` |
 | describe **sound**, or affect at an extreme | describe **atmosphere, production, association** |
@@ -48,14 +48,14 @@ So the selection rule is mechanical: **keep words that describe how a track
 sounds; drop words that describe how it makes you feel about something else.**
 122 of 216 candidates survive at spread ≤ 12.
 
-That rule is **linguistic, not local** — association words behave the same way in
-any collection — which is what makes it safe to apply as a principle to a
+That rule is **linguistic, not local** (association words behave the same way in
+any collection), which is what makes it safe to apply as a principle to a
 universal vocabulary rather than re-measuring per library. The association words
 still appear in `src/vocabulary.ts`, but as *synonyms* mapping onto anchored
 terms (`nostalgic` → `wistful`, `raw` → `gritty`), because users will type them
 regardless.
 
-And the medians reveal the deeper point — a coherent word *is* a named region in
+And the medians reveal the deeper point, a coherent word *is* a named region in
 mood-space:
 
 ```
@@ -68,26 +68,26 @@ Words and axes are not two systems. Words are labels for places.
 
 ## Schema v2
 
-**Sonic axes** — these drive cohesion, because they're what makes two tracks sit
+**Sonic axes** - these drive cohesion, because they're what makes two tracks sit
 comfortably next to each other:
 
 | Field | Range | Meaning |
 |---|---|---|
-| `energy` | 0–100 | still → frantic activity |
-| `intensity` | 0–100 | gentle → heavy/aggressive |
-| `acousticness` | 0–100 | fully electronic → fully acoustic *(was `organic` in v1)* |
-| `density` | 0–100 | sparse/solo → wall-of-sound **(new)** |
+| `energy` | 0-100 | still → frantic activity |
+| `intensity` | 0-100 | gentle → heavy/aggressive |
+| `acousticness` | 0-100 | fully electronic → fully acoustic *(was `organic` in v1)* |
+| `density` | 0-100 | sparse/solo → wall-of-sound **(new)** |
 | `tempo_feel` | enum | `still` \| `slow` \| `mid` \| `driving` \| `frantic` **(new)** |
 | `vocal` | enum | `instrumental` \| `sung` \| `rapped` \| `mixed` **(new)** |
 
-**Affective axis** — deliberately separate, because two tracks can differ in
+**Affective axis** - deliberately separate, because two tracks can differ in
 valence and still flow:
 
-| `valence` | 0–100 | bleak → joyful |
+| `valence` | 0-100 | bleak → joyful |
 
-**Semantic** — for describing and searching, never for cohesion alone:
+**Semantic** - for describing and searching, never for cohesion alone:
 
-| `moods` | 2–4 terms from a **controlled vocabulary** |
+| `moods` | 2-4 terms from a **controlled vocabulary** |
 | `times` | times of day it fits |
 
 Vibe membership is deliberately *not* a field. It is computed from the axes, so it costs no
@@ -102,7 +102,7 @@ jarring even when energy and intensity agree:
 - A 70bpm ballad and a 140bpm track can both be `E50`.
 - An instrumental and a rap verse can be identical on every numeric axis.
 
-BPM is unusable here — only 24 of 9,311 files carry it — so `tempo_feel` has to
+BPM is unusable here (only 24 of 9,311 files carry it), so `tempo_feel` has to
 be inferred rather than read.
 
 Cost impact is negligible: ~15 extra output tokens per track against ~96 today.
@@ -129,7 +129,7 @@ becoming emotionally monotonous while staying sonically coherent.
 ## Vibes as regions
 
 A vibe is a centre, a radius, and optional hard constraints. Membership is
-`numericDistance(track, centre) <= radius` once the constraints pass — a measurement, not a
+`numericDistance(track, centre) <= radius` once the constraints pass, a measurement, not a
 prediction, so it works in a library with no playlists and carries no accuracy caveat.
 
 The radii are calibrated so each region covers about 7% of mood-space. Measured against a
@@ -146,13 +146,13 @@ a valence bound, exactly as `focus` carries an instrumental one:
 
 | Region | Bound |
 |---|---|
-| `melancholy` | valence 0–45 |
-| `heavy` | valence 0–55 |
-| `golden hour` | valence 45–100 |
-| `hype` | valence 50–100 |
-| `uplift`, `party` | valence 55–100 |
+| `melancholy` | valence 0-45 |
+| `heavy` | valence 0-55 |
+| `golden hour` | valence 45-100 |
+| `hype` | valence 50-100 |
+| `uplift`, `party` | valence 55-100 |
 
-Regions like `focus`, `background` and `driving` get none — they are functional, not
+Regions like `focus`, `background` and `driving` get none: they are functional, not
 affective, and constraining their valence would be wrong.
 
 Note the calibration is against a *uniform* sample of mood-space. Real libraries cluster
@@ -161,7 +161,7 @@ space. Re-measure against a labelled library once one exists.
 
 ## Sequencing
 
-Selecting a coherent set is necessary but not sufficient — order still matters.
+Selecting a coherent set is necessary but not sufficient: order still matters.
 A `sequence_tracks` step orders a chosen set to minimise total transition cost
 (the same distance metric) subject to an energy arc appropriate to the hour:
 a morning list ramps gently, an evening list peaks and settles.
@@ -174,7 +174,7 @@ filters plus diversity and sequencing constraints, and a deterministic engine
 executes it.
 
 Static track lists are the default output. Navidrome's smart playlists can
-express a box in mood-space but not a sphere, per-artist caps, or ordering — so
+express a box in mood-space but not a sphere, per-artist caps, or ordering, so
 they reintroduce most of the problem this design exists to solve. They remain a
 documented path for standing collections where order does not matter.
 
@@ -182,7 +182,7 @@ documented path for standing collections where order does not matter.
 
 The **plugin** (`navidrome-mood`) writes labels as Navidrome tags. The
 **connector** (`navidrome-mcp`) reads those tags instead of keeping its own
-snapshot, and owns the query engine — cohesion, sequencing, the daylist.
+snapshot, and owns the query engine: cohesion, sequencing, the daylist.
 
 Tags are the better home: they survive the connector, and Music Assistant and
 every Subsonic client can see them. One label, many readers.
