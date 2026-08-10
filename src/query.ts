@@ -53,7 +53,7 @@ export interface SearchParams {
   bpm_min?: number;
   bpm_max?: number;
   starred?: boolean;
-  // Inferred mood axes (0-100), covering the whole library. See mood.ts.
+  // Mood axes (0-100), read from the plugin's tags. See moodtags.ts.
   energy_min?: number;
   energy_max?: number;
   valence_min?: number;
@@ -73,7 +73,8 @@ export interface SearchParams {
   fits_time?: string;
   include_missing?: boolean;
   exclude_track_ids?: string[];
-  exclude_recent_daylists?: number;
+  /** Rotation guard: what one rolling playlist's own recent revisions used. */
+  exclude_recent_runs?: { playlist: string; runs: number };
   max_per_artist?: number;
   max_per_album?: number;
   sort?: SortKey;
@@ -143,8 +144,9 @@ export function search(store: Store, p: SearchParams): { total: number; tracks: 
   const nowSec = Math.floor(now / 1000);
 
   const excluded = new Set(p.exclude_track_ids ?? []);
-  if (p.exclude_recent_daylists && p.exclude_recent_daylists > 0) {
-    for (const id of store.recentDaylistTrackIds(p.exclude_recent_daylists)) excluded.add(id);
+  const rotation = p.exclude_recent_runs;
+  if (rotation?.playlist && rotation.runs > 0) {
+    for (const id of store.recentRunTrackIds(rotation.playlist, rotation.runs)) excluded.add(id);
   }
 
   const qTerms = p.query ? norm(p.query).split(" ").filter(Boolean) : [];

@@ -39,7 +39,6 @@ import { MOOD_TAG_NAMES } from "./moodtags.js";
 
 const env = process.env;
 const TZ = env.NAVIDROME_TZ || "America/Chicago";
-const DAYLIST_NAME = env.DAYLIST_PLAYLIST_NAME || "daylist";
 const DATA_DIR = env.NAVIDROME_DATA_DIR || "/data/navidrome-mcp";
 
 /**
@@ -74,7 +73,6 @@ const store = new Store({
   listenBrainzUser: env.LISTENBRAINZ_USER,
   lastFmKey: env.LASTFM_API_KEY,
   timezone: TZ,
-  daylistName: DAYLIST_NAME,
   historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 730) || 730,
   enrich: env.NAVIDROME_ENRICH !== "0",
 });
@@ -259,11 +257,15 @@ const searchShape = {
     .describe("One of: early morning, morning, midday, afternoon, golden hour, evening, late night."),
   include_missing: z.boolean().optional().describe("Include tracks whose file is missing. Default false."),
   exclude_track_ids: z.array(z.string()).optional(),
-  exclude_recent_daylists: z
-    .number()
-    .int()
+  exclude_recent_runs: z
+    .object({
+      playlist: z.string().describe("The rolling playlist's fixed title, e.g. 'daylist' or 'mix: chill'."),
+      runs: z.number().int().min(1).describe("How many of its past revisions to exclude. ~6 for an hourly list."),
+    })
     .optional()
-    .describe("Exclude everything used by the last N daylist runs. Use ~6 for hourly rotation."),
+    .describe(
+      "Exclude everything the last N revisions of ONE rolling playlist used, so it moves on rather than repeating itself. Scoped to that playlist: what a different rolling list used is not excluded.",
+    ),
   max_per_artist: z.number().int().optional().describe("Cap tracks per artist. Use 1-2 for playlists."),
   max_per_album: z.number().int().optional(),
   sort: z
@@ -701,7 +703,7 @@ server.registerTool(
   {
     title: "Update a playlist",
     description:
-      "Rename a playlist, change its description, and/or replace or append its tracks. Replacing is the normal way to refresh a rolling playlist in place.",
+      "Rename a playlist, change its description, and/or replace or append its tracks. For a rolling playlist use `commit_playlist` instead: it does the same refresh but cannot rename or duplicate the list.",
     inputSchema: {
       playlist_id: z.string().optional(),
       name: z.string().optional().describe("Existing playlist name, if not passing an id."),
@@ -814,56 +816,73 @@ server.registerTool(
   ),
 );
 
-// ── daylist ─────────────────────────────────────────────────────────────────
+// ── right now, and publishing a rolling playlist ─────────────────────────────
 
 server.registerTool(
-  "daylist_context",
+  "now_context",
   {
-    title: "Get daylist context for right now",
+    title: "What suits right now",
     description:
-      "Everything needed to generate this hour's daylist: local time and part of day, which vibe regions fit this hour (measured as lift over each region's own average where listen history exists, falling back to the region's declared hours where it does not), the artists/genres/tags that dominate this hour historically, what has been heard in the last few days, and the titles of recent daylists so the new one does not repeat them.",
+      "What suits right now, in this library, at this hour: local time and part of day, which vibe regions fit the hour (measured as lift over each region's own average where listen history exists, falling back to the region's declared hours where it does not), the artists/genres/tags that dominate this hour historically, what has been heard in the last few days, and what the recent rolling-playlist revisions already used. Call it before building any playlist meant for the present moment, whether that is the hourly daylist or a standing mix.",
     inputSchema: {
       hour_of_day: z.number().int().min(0).max(23).optional().describe("Override the current hour."),
-      recent_runs: z.number().int().optional().describe("How many past daylists to report. Default 8."),
+      playlist: z
+        .string()
+        .optional()
+        .describe("Report only this rolling playlist's own past revisions, e.g. 'mix: chill'."),
+      recent_runs: z.number().int().optional().describe("How many past revisions to report. Default 8."),
     },
     annotations: { readOnlyHint: true },
   },
-  tool(async ({ hour_of_day, recent_runs }: { hour_of_day?: number; recent_runs?: number }) => {
-    const tc = timeContext(TZ);
-    const hour = hour_of_day ?? tc.hour;
-    const runs = store.daylistRuns.slice(-(recent_runs ?? 8));
-    return result(
-      `${tc.dayName} ${String(hour).padStart(2, "0")}:00 (${tc.partOfDay}, ${tc.season}) in ${TZ}.`,
-      {
-        now: { ...tc, hour },
-        vibe_fit: vibeFits(store, hour),
-        hour_profile: hourProfile(store, hour),
-        recent_activity: recentActivity(store, 7),
-        recent_daylists: runs.map((r) => ({
-          at: new Date(r.at).toISOString(),
-          title: r.title,
-          tracks: r.trackIds.length,
-        })),
-        rotation_note:
-          "Pass exclude_recent_daylists to search_tracks (6 is a good value for hourly runs) so the next list moves on.",
-        daylist_playlist_name: DAYLIST_NAME,
-      },
-    );
-  }),
+  tool(
+    async ({
+      hour_of_day,
+      playlist,
+      recent_runs,
+    }: { hour_of_day?: number; playlist?: string; recent_runs?: number }) => {
+      const tc = timeContext(TZ);
+      const hour = hour_of_day ?? tc.hour;
+      const runs = store.recentRuns(recent_runs ?? 8, playlist);
+      return result(
+        `${tc.dayName} ${String(hour).padStart(2, "0")}:00 (${tc.partOfDay}, ${tc.season}) in ${TZ}.`,
+        {
+          now: { ...tc, hour },
+          vibe_fit: vibeFits(store, hour),
+          hour_profile: hourProfile(store, hour),
+          recent_activity: recentActivity(store, 7),
+          recent_playlist_runs: runs.map((r) => ({
+            at: new Date(r.at).toISOString(),
+            playlist: r.playlist,
+            description: r.description,
+            tracks: r.trackIds.length,
+          })),
+          rotation_note:
+            "Pass exclude_recent_runs to search_tracks, naming the playlist you are about to write and how many of its past revisions to skip (6 suits an hourly list), so it moves on instead of repeating itself.",
+        },
+      );
+    },
+  ),
 );
 
 server.registerTool(
-  "commit_daylist",
+  "commit_playlist",
   {
-    title: "Publish the daylist",
+    title: "Publish a revision of a rolling playlist",
     description:
-      "Write the daylist in one atomic step: replace the rolling daylist playlist's tracks, rename it to the new title, set its description, and record the run so future daylists can avoid repeating these tracks. Creates the playlist on first use.",
+      "Write one revision of a rolling playlist in a single step: find the playlist by its exact title, replace its tracks, and set its description. A rolling playlist keeps one title for its whole life, so the title is how it is identified and is never rewritten; the line that changes between revisions is the description. Creates the playlist the first time a title is used, and never a second time.",
     inputSchema: {
       title: z
         .string()
-        .describe("The daylist's name for this hour, in his voice, e.g. 'golden hour synth cruise'."),
-      track_ids: z.array(z.string()).min(1),
-      description: z.string().optional().describe("One line on why these tracks, shown as the playlist comment."),
+        .describe(
+          "The playlist's permanent title, e.g. 'daylist', 'on repeat' or 'mix: chill'. Matched exactly, ignoring case and surrounding space.",
+        ),
+      track_ids: z.array(z.string()).min(1).describe("The final ordered set of tracks."),
+      description: z
+        .string()
+        .optional()
+        .describe(
+          "One line on why these tracks now, shown as the playlist's comment in Navidrome. This is where a phrase like 'golden hour synth cruise' belongs.",
+        ),
     },
   },
   tool(
@@ -872,48 +891,53 @@ server.registerTool(
       track_ids,
       description,
     }: { title: string; track_ids: string[]; description?: string }) => {
+      // Two guarantees are enforced here rather than left to the caller: an
+      // existing playlist is never renamed, and a title that already exists never
+      // produces a second playlist. A recurring agent that gets either wrong loses
+      // its handle on the list and makes a fresh one on the next run, so the
+      // library grows a slowly accumulating pile of near-identical playlists --
+      // a failure nobody notices until there are forty of them.
+      const wanted = norm(title);
       const pls = await navidrome.listPlaylists();
-      // The playlist is identified by the run history, not by its name -- the name
-      // changes every hour, so matching on it would create a new playlist each run.
-      let id = pls.find((p) => p.id === lastDaylistId)?.id;
-      if (!id) {
-        const prevTitles = new Set(store.daylistRuns.map((r) => norm(r.title)));
-        id =
-          pls.find((p) => norm(p.name) === norm(DAYLIST_NAME))?.id ??
-          pls.find((p) => prevTitles.has(norm(p.name)))?.id;
-      }
-      let created = false;
-      if (!id) {
-        id = await navidrome.createPlaylist({
-          name: title,
-          comment: description ?? "",
-          public: false,
-        });
-        created = true;
-      }
-      const written = created
-        ? await navidrome.addTracks(id, track_ids)
-        : await navidrome.replaceTracks(id, track_ids);
-      if (!created) {
-        await navidrome.updatePlaylist(id, { name: title, comment: description ?? "" });
-      }
-      lastDaylistId = id;
-      store.recordDaylistRun({ at: Date.now(), title, trackIds: track_ids });
+      // Sorted so a library that already holds duplicates of this title still gets
+      // the same one written every run, whatever order Navidrome lists them in.
+      const matches = pls
+        .filter((p) => norm(p.name ?? "") === wanted)
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      const existing = matches[0];
+
+      const id =
+        existing?.id ??
+        (await navidrome.createPlaylist({ name: title, comment: description ?? "", public: false }));
+      const written = existing
+        ? await navidrome.replaceTracks(id, track_ids)
+        : await navidrome.addTracks(id, track_ids);
+      // The patch carries no name, so Navidrome updates the comment alone.
+      if (existing) await navidrome.updatePlaylist(id, { comment: description ?? "" });
+
+      store.recordPlaylistRun({ at: Date.now(), playlist: title, description, trackIds: track_ids });
       await store.saveSnapshot();
       const dur = track_ids
         .map((i) => store.byId.get(i)?.duration ?? 0)
         .reduce((a, b) => a + b, 0);
       return result(
-        `Daylist published as "${title}": ${written} tracks, ${fmtDuration(dur)}.` +
-          (created ? " (created the rolling playlist)" : ""),
-        { playlist_id: id, title, tracks: written, duration: fmtDuration(dur) },
+        `"${title}" now holds ${written} tracks (${fmtDuration(dur)}).` +
+          (existing ? "" : " Created it.") +
+          (matches.length > 1
+            ? ` Note: ${matches.length} playlists already share this title; wrote to ${id}.`
+            : ""),
+        {
+          playlist_id: id,
+          title,
+          tracks: written,
+          duration: fmtDuration(dur),
+          created: !existing,
+          description,
+        },
       );
     },
   ),
 );
-
-/** Remembered across calls so the rolling playlist is never duplicated. */
-let lastDaylistId: string | undefined;
 
 server.registerTool(
   "mood_coverage",
@@ -962,9 +986,9 @@ server.registerTool(
 server.registerPrompt(
   "daylist",
   {
-    title: "Generate this hour's daylist",
+    title: "Refresh the daylist for this hour",
     description:
-      "Spotify-style daylist: read the hour's context, pick a vibe that fits it, source ~25 tracks that hold together, name it, and publish it to the rolling daylist playlist.",
+      "Spotify-style daylist: read what suits right now, pick a vibe that fits the hour, source ~25 tracks that hold together, and publish them to the `daylist` playlist with a description that says what this hour sounds like.",
     argsSchema: {
       length: z.string().optional().describe("Roughly how many tracks. Default 25."),
       steer: z.string().optional().describe("Optional nudge, e.g. 'keep it instrumental' or 'lean older'."),
@@ -977,17 +1001,17 @@ server.registerPrompt(
         content: {
           type: "text" as const,
           text: [
-            `Generate my daylist for right now (about ${length || "25"} tracks).`,
+            `Refresh my daylist for right now (about ${length || "25"} tracks).`,
             steer ? `Steer: ${steer}` : "",
             "",
             "Work in this order and do not skip steps:",
             "",
-            "1. Call `daylist_context`. Read vibe_fit, the hour_profile, and what I have heard in the",
-            "   last few days. Note the titles of recent daylists.",
+            '1. Call `now_context` with playlist: "daylist". Read vibe_fit, the hour_profile, and what',
+            "   I have heard in the last few days. Note the descriptions of its recent revisions.",
             "",
             "2. Pick the vibe for THIS hour. Prefer one with lift > 1: that is measured evidence I",
             "   really do reach for it now. Where lift is null there is no history for that region, so",
-            "   fall back to `suits_hour`. If two are close, take the one the recent daylists have used",
+            "   fall back to `suits_hour`. If two are close, take the one the recent revisions have used",
             "   least. Call `get_vibe_profile` to hear what that region actually contains here, and",
             "   check its mood_spread: a wide one means you will have to narrow the search yourself.",
             "",
@@ -996,7 +1020,7 @@ server.registerPrompt(
             "     - keep the set coherent: narrow `tempo_feel` and `intensity` rather than taking",
             "       whatever the region returns. Two tracks with the same mood word can still sound",
             "       nothing alike, and the axes are what stop that",
-            "     - pass `exclude_recent_daylists: 6` so this list is not a rerun",
+            '     - pass `exclude_recent_runs: {playlist: "daylist", runs: 6}` so this is not a rerun',
             "     - pass `max_per_artist: 2` so it does not collapse onto one artist",
             "     - pass `hour_of_day` from the context and leave sort on `affinity`",
             "     - over-fetch (limit ~60) and then choose the final set yourself for flow",
@@ -1008,15 +1032,17 @@ server.registerPrompt(
             "   coherent with the hour, avoid two songs by the same artist back to back, and do not put",
             "   a sparse acoustic track next to a dense loud one however well they match on mood.",
             "",
-            "5. Name it the way Spotify names a daylist: lowercase, 2-4 words, concrete and a little",
-            "   specific, evoking the time and feel rather than the genre, e.g. 'golden hour synth cruise',",
-            "   'slow shreds tuesday haze', 'late night verse vibes'. Do not reuse a recent title.",
+            "5. Write the description the way Spotify names a daylist: lowercase, 2-4 words, concrete",
+            "   and a little specific, evoking the time and feel rather than the genre, e.g. 'golden hour",
+            "   synth cruise', 'slow shreds tuesday haze', 'late night verse vibes'. Do not reuse a",
+            "   recent one.",
             "",
-            "6. Publish with `commit_daylist`, passing the title, the ordered track_ids, and a one-line",
-            "   description of why these tracks fit this hour.",
+            '6. Publish with `commit_playlist`, passing title: "daylist", the ordered track_ids, and that',
+            "   line as the description. The playlist keeps the title `daylist` permanently: the hour's",
+            "   phrase lives in the description, so do not put it in the title and do not rename anything.",
             "",
-            "Then tell me, briefly: the title, the vibe you picked and why the data supported it, and",
-            "3-4 highlights. Do not list every track.",
+            "Then tell me, briefly: the description you wrote, the vibe you picked and why the data",
+            "supported it, and 3-4 highlights. Do not list every track.",
           ]
             .filter(Boolean)
             .join("\n"),

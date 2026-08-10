@@ -6,8 +6,9 @@ Written to survive a context compaction. Reflects the state on 2026-08-09.
 
 A **prompt-to-playlist** system for any Navidrome library. A user describes what
 they want in words; that compiles into a specification; a deterministic engine
-selects and sequences the tracks. A scheduled "daylist" is one preset of that,
-not the product.
+selects and sequences the tracks. The scheduled rolling playlists (the hourly
+`daylist`, `on repeat`, `rediscover`, `time capsule` and the six `mix: ...`
+lists) are presets of that, not the product.
 
 Nothing in the design may assume a particular user's library, playlists, or
 listening history. Those are optional enrichment, never the foundation.
@@ -71,6 +72,20 @@ order does not matter and the set should grow with the library.
 
 The heuristic: *"a playlist for X"* is static; *"all my Y"* is smart.
 
+## A rolling playlist keeps its title
+
+Ten playlists get rewritten on a schedule rather than accumulating: `daylist`,
+`on repeat`, `rediscover`, `time capsule`, and `mix:` `chill` / `focus` /
+`workout` / `golden hour` / `heavy` / `melancholy`. Each keeps its title for
+life; the phrase describing this particular revision goes in the description.
+
+The title is therefore the identity, and `commit_playlist` is what enforces
+that: it matches on the title, never renames what it finds, creates only when
+nothing matches. The alternative, a generator naming its output after the mood
+of the hour, has to track identity some other way, and every miss leaves behind
+a playlist nobody deletes. Forty of them is what that looks like after a week of
+hourly runs.
+
 ## Phase 0: Portability pass ✅ done 2026-08-09
 
 - [x] `mood.ts`: the labelling prompt is built from `MOOD_ANCHORS` (coordinates
@@ -106,8 +121,9 @@ separator, written as the raw byte rather than an escape, so `file` classed it a
 `data` and plain `grep` skipped it *silently*: no match, no warning, exit 0.
 That is why this plan's original call-site list missed 15 sites in that file,
 including the `propagateVibes` wiring. Both occurrences are now `\u0000` escapes
-and the file is ordinary text again. Worth remembering as a class of bug: a
-search that reports success while searching nothing.
+and the file is ordinary text again. `matchKey` in `src/listenbrainz.ts` held a
+third, hiding that file the same way, and is escaped too. Worth remembering as a
+class of bug: a search that reports success while searching nothing.
 
 **The vibe radii were wrong.** Guessed by eye last session; measured against a
 uniform sample of mood-space, `driving` covered 46% of it and a typical point
@@ -263,7 +279,7 @@ filters, history constraints, diversity caps, size, sequencing arc, refresh mode
 | Prompt → spec | one model call: parsing novel intent is the real job for an LLM |
 | Select | constrained sampling within the region, diversity caps, rotation exclusion |
 | Sequence | `sequence()`: greedy nearest-neighbour along an energy arc |
-| Name | template, or a ~200-token call |
+| Describe | template, or a ~200-token call. A rolling playlist is only described: its title is fixed |
 | Commit | write the playlist |
 
 - [ ] `create_playlist_from_prompt` implementing the above

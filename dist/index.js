@@ -776,8 +776,9 @@ function search(store2, p) {
   const now = Date.now();
   const nowSec = Math.floor(now / 1e3);
   const excluded = new Set(p.exclude_track_ids ?? []);
-  if (p.exclude_recent_daylists && p.exclude_recent_daylists > 0) {
-    for (const id of store2.recentDaylistTrackIds(p.exclude_recent_daylists)) excluded.add(id);
+  const rotation = p.exclude_recent_runs;
+  if (rotation?.playlist && rotation.runs > 0) {
+    for (const id of store2.recentRunTrackIds(rotation.playlist, rotation.runs)) excluded.add(id);
   }
   const qTerms = p.query ? norm(p.query).split(" ").filter(Boolean) : [];
   const decadeSet = new Set(
@@ -1219,11 +1220,11 @@ function moodDiagnosis(total, labelled, anyMoodTag) {
   if (!anyMoodTag) {
     return "No mood tags exist in this library, so every mood filter will match nothing. Mood data comes from the navidrome-mood plugin, which labels tracks and writes the tags into the audio files; this server only reads them. Install and run it, then call refresh_index.";
   }
-  return `Mood tags are present but none parsed into a complete label. The numeric axes (${TAGS.energy}, ${TAGS.valence}, ${TAGS.intensity}, ${TAGS.acousticness}, ${TAGS.density}) plus ${TAGS.tempo} and ${TAGS.vocal} are all required. The usual cause is that Navidrome's mappings.yaml does not register them, so it indexes the MOOD words and drops the rest.`;
+  return `Mood tags are present but none parsed into a complete label. The numeric axes (${TAGS.energy}, ${TAGS.valence}, ${TAGS.intensity}, ${TAGS.acousticness}, ${TAGS.density}) plus ${TAGS.tempo} and ${TAGS.vocal} are all required. The usual cause is that these tags are not declared under \`Tags\` in Navidrome's own config file (not \`mappings.yaml\`, which is embedded in the binary and cannot be edited), so the scanner drops them and only the built-in MOOD words survive.`;
 }
 
 // src/store.ts
-var SNAPSHOT_VERSION = 6;
+var SNAPSHOT_VERSION = 7;
 function log(msg) {
   console.error(`[navidrome-mcp] ${msg}`);
 }
@@ -1245,7 +1246,7 @@ var Store = class {
   vibes = {};
   playlists = [];
   listens = [];
-  daylistRuns = [];
+  playlistRuns = [];
   syncedAt = 0;
   listensSyncedAt = 0;
   trackTags = {};
@@ -1296,7 +1297,7 @@ var Store = class {
       this.artistTags = s.artistTags ?? {};
       this.taggedTracks = new Set(s.taggedTracks ?? []);
       this.taggedArtists = new Set(s.taggedArtists ?? []);
-      this.daylistRuns = s.daylistRuns ?? [];
+      this.playlistRuns = s.playlistRuns ?? [];
       this.listens = (s.listenTs ?? []).map((ts, i) => {
         const key = s.listenKeys[s.listenKi[i]] ?? " ";
         const sep = key.indexOf("\0");
@@ -1358,7 +1359,7 @@ var Store = class {
       listenKi,
       taggedTracks: [...this.taggedTracks],
       taggedArtists: [...this.taggedArtists],
-      daylistRuns: this.daylistRuns.slice(-200)
+      playlistRuns: this.playlistRuns.slice(-200)
     };
     await mkdir(dirname(this.snapshotPath), { recursive: true });
     const tmp = `${this.snapshotPath}.${process.pid}.${++this.snapshotSeq}.tmp`;
@@ -1382,10 +1383,11 @@ var Store = class {
     log(`library: ${songs.length} tracks in ${Math.round((Date.now() - t0) / 1e3)}s`);
     const playlists = await nd.listPlaylists();
     this.playlists = playlists;
+    const rolling = new Set(this.playlistRuns.map((r) => norm(r.playlist)));
     const vibes = {};
     for (const p of playlists) {
       if (!p.name || !p.id) continue;
-      if (this.isNonVibePlaylist(p)) continue;
+      if (this.isNonVibePlaylist(p, rolling)) continue;
       try {
         const rows = await nd.playlistTracks(p.id);
         vibes[p.name] = rows.map((r) => r.id);
@@ -1401,14 +1403,15 @@ var Store = class {
   /**
    * Which playlists count as hand-curated taste signal.
    *
-   * Excluded: the rolling daylist (it is our own output, so treating it as taste
-   * input would feed the generator its own tail), and anything the ListenBrainz
-   * plugin imported (those are recommendations, not the listener's own filing).
+   * Excluded: every rolling playlist this server has published to, since
+   * treating our own output as taste input feeds the generator its own tail, and
+   * anything the ListenBrainz plugin imported (those are recommendations, not
+   * the listener's own filing). Rolling playlists are recognised from the run
+   * history rather than from a name pattern, so a listener's own playlist called
+   * "daylist" still counts as taste signal until something publishes to it.
    */
-  isNonVibePlaylist(p) {
-    const name = (p.name ?? "").toLowerCase();
-    if (name === this.opts.daylistName.toLowerCase()) return true;
-    if (name.startsWith("daylist")) return true;
+  isNonVibePlaylist(p, rollingTitles) {
+    if (rollingTitles.has(norm(p.name ?? ""))) return true;
     if ((p.comment ?? "").includes("listenbrainz.org/playlist")) return true;
     if (/^(listenbrainz|generated daily jams|last week's jams)/i.test(p.name ?? "")) return true;
     return false;
@@ -1517,8 +1520,8 @@ var Store = class {
    *
    * Reports *why* when the answer is none. "0 labelled" reads identically
    * whether the plugin was never installed, ran but wrote nothing, or wrote tags
-   * Navidrome then dropped for want of a mappings.yaml entry -- and those need
-   * three different fixes.
+   * Navidrome then dropped for want of a `Tags` entry in its own config -- and
+   * those need three different fixes.
    */
   moodCoverage() {
     const labelled = this.tracks.filter((t) => t.mood).length;
@@ -1660,9 +1663,16 @@ var Store = class {
     }
     return [...counts.entries()].sort((a, b) => a[0] - b[0]).map(([d, tracks]) => ({ decade: `${d}s`, tracks }));
   }
-  recordDaylistRun(run) {
-    this.daylistRuns.push(run);
-    if (this.daylistRuns.length > 200) this.daylistRuns = this.daylistRuns.slice(-200);
+  recordPlaylistRun(run) {
+    this.playlistRuns.push(run);
+    if (this.playlistRuns.length > 200) this.playlistRuns = this.playlistRuns.slice(-200);
+  }
+  /** The most recent revisions of one rolling playlist, or of all of them. */
+  recentRuns(runs, playlist) {
+    if (runs <= 0) return [];
+    const key = playlist ? norm(playlist) : void 0;
+    const rows = key ? this.playlistRuns.filter((r) => norm(r.playlist) === key) : this.playlistRuns;
+    return rows.slice(-runs);
   }
   /** Distinct free-form mood descriptors across the library. */
   moodVocabulary(limit = 80) {
@@ -1672,10 +1682,16 @@ var Store = class {
     }
     return [...counts.entries()].map(([mood, tracks]) => ({ mood, tracks })).sort((a, b) => b.tracks - a.tracks).slice(0, limit);
   }
-  /** Track ids used by the last `runs` daylists, for rotation avoidance. */
-  recentDaylistTrackIds(runs) {
+  /**
+   * Track ids the last `runs` revisions of one rolling playlist used.
+   *
+   * Scoped to a single playlist so each one avoids repeating itself. Pooling
+   * every rolling playlist's history instead would let a busy hourly list strip
+   * the candidates out from under all the others.
+   */
+  recentRunTrackIds(playlist, runs) {
     const out = /* @__PURE__ */ new Set();
-    for (const r of this.daylistRuns.slice(-Math.max(0, runs))) {
+    for (const r of this.recentRuns(runs, playlist)) {
       for (const id of r.trackIds) out.add(id);
     }
     return out;
@@ -1685,7 +1701,6 @@ var Store = class {
 // src/index.ts
 var env = process.env;
 var TZ = env.NAVIDROME_TZ || "America/Chicago";
-var DAYLIST_NAME = env.DAYLIST_PLAYLIST_NAME || "daylist";
 var DATA_DIR = env.NAVIDROME_DATA_DIR || "/data/navidrome-mcp";
 var proxyUrl = env.NAVIDROME_PROXY;
 var dispatcher;
@@ -1711,7 +1726,6 @@ var store = new Store({
   listenBrainzUser: env.LISTENBRAINZ_USER,
   lastFmKey: env.LASTFM_API_KEY,
   timezone: TZ,
-  daylistName: DAYLIST_NAME,
   historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 730) || 730,
   enrich: env.NAVIDROME_ENRICH !== "0"
 });
@@ -1801,7 +1815,7 @@ var searchShape = {
   tags_mode: z.enum(["any", "all"]).optional().describe("Default 'any'."),
   exclude_tags: z.array(z.string()).optional(),
   vibes: z.array(z.string()).optional().describe(
-    "Restrict to tracks the listener filed onto these named playlists by hand. Most libraries have few or none \u2014 prefer `mood_vibes`."
+    "Restrict to tracks the listener filed onto these named playlists by hand. Most libraries have few or none: prefer `mood_vibes`."
   ),
   exclude_vibes: z.array(z.string()).optional(),
   year_min: z.number().int().optional(),
@@ -1849,7 +1863,12 @@ var searchShape = {
   fits_time: z.string().optional().describe("One of: early morning, morning, midday, afternoon, golden hour, evening, late night."),
   include_missing: z.boolean().optional().describe("Include tracks whose file is missing. Default false."),
   exclude_track_ids: z.array(z.string()).optional(),
-  exclude_recent_daylists: z.number().int().optional().describe("Exclude everything used by the last N daylist runs. Use ~6 for hourly rotation."),
+  exclude_recent_runs: z.object({
+    playlist: z.string().describe("The rolling playlist's fixed title, e.g. 'daylist' or 'mix: chill'."),
+    runs: z.number().int().min(1).describe("How many of its past revisions to exclude. ~6 for an hourly list.")
+  }).optional().describe(
+    "Exclude everything the last N revisions of ONE rolling playlist used, so it moves on rather than repeating itself. Scoped to that playlist: what a different rolling list used is not excluded."
+  ),
   max_per_artist: z.number().int().optional().describe("Cap tracks per artist. Use 1-2 for playlists."),
   max_per_album: z.number().int().optional(),
   sort: z.enum([
@@ -1875,7 +1894,7 @@ server.registerTool(
   "search_tracks",
   {
     title: "Search tracks with full compound filtering",
-    description: "The main query tool, over the WHOLE library. Every filter composes: real year/date ranges, play and listen recency, the seven mood axes (energy, valence, intensity, acousticness, density, tempo_feel, vocal), mood descriptors, vibe regions, Last.fm tags, duration, time-of-day fit, plus per-artist diversity caps and personal-affinity ranking.\n\nFor mood requests use `mood_vibes` / `moods` / the axis ranges. `vibes` is a different thing: it matches only tracks filed onto a named playlist by hand, which many libraries have none of.\n\nThe mood filters need the labelling pass \u2014 check `mood_coverage` in describe_library before relying on them.",
+    description: "The main query tool, over the WHOLE library. Every filter composes: real year/date ranges, play and listen recency, the seven mood axes (energy, valence, intensity, acousticness, density, tempo_feel, vocal), mood descriptors, vibe regions, Last.fm tags, duration, time-of-day fit, plus per-artist diversity caps and personal-affinity ranking.\n\nFor mood requests use `mood_vibes` / `moods` / the axis ranges. `vibes` is a different thing: it matches only tracks filed onto a named playlist by hand, which many libraries have none of.\n\nThe mood filters need the labelling pass: check `mood_coverage` in describe_library before relying on them.",
     inputSchema: searchShape,
     annotations: { readOnlyHint: true }
   },
@@ -1970,7 +1989,7 @@ server.registerTool(
   "similar_tracks",
   {
     title: "Find similar tracks in the library",
-    description: "Expand from seed tracks or artists. Combines Navidrome's agent-backed similarity (Last.fm/Deezer/ListenBrainz) with co-occurrence in the listener's own playlists, where those exist \u2014 tracks repeatedly filed alongside the seed. Results are restricted to what is actually in the library.",
+    description: "Expand from seed tracks or artists. Combines Navidrome's agent-backed similarity (Last.fm/Deezer/ListenBrainz) with co-occurrence in the listener's own playlists, where those exist: tracks repeatedly filed alongside the seed. Results are restricted to what is actually in the library.",
     inputSchema: {
       track_ids: z.array(z.string()).optional().describe("Seed track ids."),
       artists: z.array(z.string()).optional().describe("Seed artist names."),
@@ -2031,7 +2050,7 @@ server.registerTool(
   "listening_history",
   {
     title: "Analyse listening history",
-    description: "Query the ListenBrainz history: recent plays, top artists/tracks over a window, hour-of-day and weekday habits, rising/falling trends, and long-loved-but-forgotten tracks worth resurfacing. This is the only source of timestamped history \u2014 Navidrome itself keeps only a play count and a last-played time.",
+    description: "Query the ListenBrainz history: recent plays, top artists/tracks over a window, hour-of-day and weekday habits, rising/falling trends, and long-loved-but-forgotten tracks worth resurfacing. This is the only source of timestamped history: Navidrome itself keeps only a play count and a last-played time.",
     inputSchema: {
       mode: z.enum(["recent", "top", "by_hour", "by_weekday", "rediscover", "trending"]).describe("Which analysis to run."),
       days: z.number().int().optional().describe("Window in days. Default 30."),
@@ -2205,7 +2224,7 @@ server.registerTool(
   "update_playlist",
   {
     title: "Update a playlist",
-    description: "Rename a playlist, change its description, and/or replace or append its tracks. Replacing is the normal way to refresh a rolling playlist in place.",
+    description: "Rename a playlist, change its description, and/or replace or append its tracks. For a rolling playlist use `commit_playlist` instead: it does the same refresh but cannot rename or duplicate the list.",
     inputSchema: {
       playlist_id: z.string().optional(),
       name: z.string().optional().describe("Existing playlist name, if not passing an id."),
@@ -2257,14 +2276,14 @@ server.registerTool(
   "create_smart_playlist",
   {
     title: "Create a smart (self-updating) playlist",
-    description: `Create a playlist defined by RULES rather than a fixed track list. Navidrome re-evaluates it continuously, so it stays current without regeneration \u2014 ideal for standing playlists like '90s rock I haven't played in a year'.
+    description: `Create a playlist defined by RULES rather than a fixed track list. Navidrome re-evaluates it continuously, so it stays current without regeneration: ideal for standing playlists like '90s rock I haven't played in a year'.
 
 Rules are Navidrome's native criteria format:
 {"all":[{"is":{"genre":"Rock"}},{"inTheRange":{"year":[1990,1999]}},{"notInTheLast":{"lastPlayed":365}}],"sort":"playCount","order":"desc","limit":100}
 
 Operators: is, isNot, gt, lt, contains, notContains, startsWith, endsWith, inTheRange, before, after, inTheLast, notInTheLast. Combine with all (AND) / any (OR), which may nest. Fields include: title, album, artist, albumartist, genre, year, dateadded, datemodified, lastplayed, playcount, rating, starred, loved, comment, bpm, length, filepath, filetype.
 
-Note: rules operate on Navidrome's own fields only \u2014 ListenBrainz listen counts and Last.fm tags are NOT available here. For those, use search_tracks plus create_playlist.`,
+Note: rules operate on Navidrome's own fields only; ListenBrainz listen counts and Last.fm tags are NOT available here. For those, use search_tracks plus create_playlist.`,
     inputSchema: {
       name: z.string(),
       rules: z.record(z.any()).describe("Navidrome smart-playlist criteria object."),
@@ -2297,47 +2316,58 @@ Note: rules operate on Navidrome's own fields only \u2014 ListenBrainz listen co
   )
 );
 server.registerTool(
-  "daylist_context",
+  "now_context",
   {
-    title: "Get daylist context for right now",
-    description: "Everything needed to generate this hour's daylist: local time and part of day, which vibe regions fit this hour (measured as lift over each region's own average where listen history exists, falling back to the region's declared hours where it does not), the artists/genres/tags that dominate this hour historically, what has been heard in the last few days, and the titles of recent daylists so the new one does not repeat them.",
+    title: "What suits right now",
+    description: "What suits right now, in this library, at this hour: local time and part of day, which vibe regions fit the hour (measured as lift over each region's own average where listen history exists, falling back to the region's declared hours where it does not), the artists/genres/tags that dominate this hour historically, what has been heard in the last few days, and what the recent rolling-playlist revisions already used. Call it before building any playlist meant for the present moment, whether that is the hourly daylist or a standing mix.",
     inputSchema: {
       hour_of_day: z.number().int().min(0).max(23).optional().describe("Override the current hour."),
-      recent_runs: z.number().int().optional().describe("How many past daylists to report. Default 8.")
+      playlist: z.string().optional().describe("Report only this rolling playlist's own past revisions, e.g. 'mix: chill'."),
+      recent_runs: z.number().int().optional().describe("How many past revisions to report. Default 8.")
     },
     annotations: { readOnlyHint: true }
   },
-  tool(async ({ hour_of_day, recent_runs }) => {
-    const tc = timeContext(TZ);
-    const hour = hour_of_day ?? tc.hour;
-    const runs = store.daylistRuns.slice(-(recent_runs ?? 8));
-    return result(
-      `${tc.dayName} ${String(hour).padStart(2, "0")}:00 (${tc.partOfDay}, ${tc.season}) in ${TZ}.`,
-      {
-        now: { ...tc, hour },
-        vibe_fit: vibeFits(store, hour),
-        hour_profile: hourProfile(store, hour),
-        recent_activity: recentActivity(store, 7),
-        recent_daylists: runs.map((r) => ({
-          at: new Date(r.at).toISOString(),
-          title: r.title,
-          tracks: r.trackIds.length
-        })),
-        rotation_note: "Pass exclude_recent_daylists to search_tracks (6 is a good value for hourly runs) so the next list moves on.",
-        daylist_playlist_name: DAYLIST_NAME
-      }
-    );
-  })
+  tool(
+    async ({
+      hour_of_day,
+      playlist,
+      recent_runs
+    }) => {
+      const tc = timeContext(TZ);
+      const hour = hour_of_day ?? tc.hour;
+      const runs = store.recentRuns(recent_runs ?? 8, playlist);
+      return result(
+        `${tc.dayName} ${String(hour).padStart(2, "0")}:00 (${tc.partOfDay}, ${tc.season}) in ${TZ}.`,
+        {
+          now: { ...tc, hour },
+          vibe_fit: vibeFits(store, hour),
+          hour_profile: hourProfile(store, hour),
+          recent_activity: recentActivity(store, 7),
+          recent_playlist_runs: runs.map((r) => ({
+            at: new Date(r.at).toISOString(),
+            playlist: r.playlist,
+            description: r.description,
+            tracks: r.trackIds.length
+          })),
+          rotation_note: "Pass exclude_recent_runs to search_tracks, naming the playlist you are about to write and how many of its past revisions to skip (6 suits an hourly list), so it moves on instead of repeating itself."
+        }
+      );
+    }
+  )
 );
 server.registerTool(
-  "commit_daylist",
+  "commit_playlist",
   {
-    title: "Publish the daylist",
-    description: "Write the daylist in one atomic step: replace the rolling daylist playlist's tracks, rename it to the new title, set its description, and record the run so future daylists can avoid repeating these tracks. Creates the playlist on first use.",
+    title: "Publish a revision of a rolling playlist",
+    description: "Write one revision of a rolling playlist in a single step: find the playlist by its exact title, replace its tracks, and set its description. A rolling playlist keeps one title for its whole life, so the title is how it is identified and is never rewritten; the line that changes between revisions is the description. Creates the playlist the first time a title is used, and never a second time.",
     inputSchema: {
-      title: z.string().describe("The daylist's name for this hour, in his voice, e.g. 'golden hour synth cruise'."),
-      track_ids: z.array(z.string()).min(1),
-      description: z.string().optional().describe("One line on why these tracks, shown as the playlist comment.")
+      title: z.string().describe(
+        "The playlist's permanent title, e.g. 'daylist', 'on repeat' or 'mix: chill'. Matched exactly, ignoring case and surrounding space."
+      ),
+      track_ids: z.array(z.string()).min(1).describe("The final ordered set of tracks."),
+      description: z.string().optional().describe(
+        "One line on why these tracks now, shown as the playlist's comment in Navidrome. This is where a phrase like 'golden hour synth cruise' belongs."
+      )
     }
   },
   tool(
@@ -2346,37 +2376,30 @@ server.registerTool(
       track_ids,
       description
     }) => {
+      const wanted = norm(title);
       const pls = await navidrome.listPlaylists();
-      let id = pls.find((p) => p.id === lastDaylistId)?.id;
-      if (!id) {
-        const prevTitles = new Set(store.daylistRuns.map((r) => norm(r.title)));
-        id = pls.find((p) => norm(p.name) === norm(DAYLIST_NAME))?.id ?? pls.find((p) => prevTitles.has(norm(p.name)))?.id;
-      }
-      let created = false;
-      if (!id) {
-        id = await navidrome.createPlaylist({
-          name: title,
-          comment: description ?? "",
-          public: false
-        });
-        created = true;
-      }
-      const written = created ? await navidrome.addTracks(id, track_ids) : await navidrome.replaceTracks(id, track_ids);
-      if (!created) {
-        await navidrome.updatePlaylist(id, { name: title, comment: description ?? "" });
-      }
-      lastDaylistId = id;
-      store.recordDaylistRun({ at: Date.now(), title, trackIds: track_ids });
+      const matches = pls.filter((p) => norm(p.name ?? "") === wanted).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+      const existing = matches[0];
+      const id = existing?.id ?? await navidrome.createPlaylist({ name: title, comment: description ?? "", public: false });
+      const written = existing ? await navidrome.replaceTracks(id, track_ids) : await navidrome.addTracks(id, track_ids);
+      if (existing) await navidrome.updatePlaylist(id, { comment: description ?? "" });
+      store.recordPlaylistRun({ at: Date.now(), playlist: title, description, trackIds: track_ids });
       await store.saveSnapshot();
       const dur = track_ids.map((i) => store.byId.get(i)?.duration ?? 0).reduce((a, b) => a + b, 0);
       return result(
-        `Daylist published as "${title}" \u2014 ${written} tracks, ${fmtDuration(dur)}.` + (created ? " (created the rolling playlist)" : ""),
-        { playlist_id: id, title, tracks: written, duration: fmtDuration(dur) }
+        `"${title}" now holds ${written} tracks (${fmtDuration(dur)}).` + (existing ? "" : " Created it.") + (matches.length > 1 ? ` Note: ${matches.length} playlists already share this title; wrote to ${id}.` : ""),
+        {
+          playlist_id: id,
+          title,
+          tracks: written,
+          duration: fmtDuration(dur),
+          created: !existing,
+          description
+        }
       );
     }
   )
 );
-var lastDaylistId;
 server.registerTool(
   "mood_coverage",
   {
@@ -2415,8 +2438,8 @@ server.registerTool(
 server.registerPrompt(
   "daylist",
   {
-    title: "Generate this hour's daylist",
-    description: "Spotify-style daylist: read the hour's context, pick a vibe that fits it, source ~25 tracks that hold together, name it, and publish it to the rolling daylist playlist.",
+    title: "Refresh the daylist for this hour",
+    description: "Spotify-style daylist: read what suits right now, pick a vibe that fits the hour, source ~25 tracks that hold together, and publish them to the `daylist` playlist with a description that says what this hour sounds like.",
     argsSchema: {
       length: z.string().optional().describe("Roughly how many tracks. Default 25."),
       steer: z.string().optional().describe("Optional nudge, e.g. 'keep it instrumental' or 'lean older'.")
@@ -2429,17 +2452,17 @@ server.registerPrompt(
         content: {
           type: "text",
           text: [
-            `Generate my daylist for right now (about ${length || "25"} tracks).`,
+            `Refresh my daylist for right now (about ${length || "25"} tracks).`,
             steer ? `Steer: ${steer}` : "",
             "",
             "Work in this order and do not skip steps:",
             "",
-            "1. Call `daylist_context`. Read vibe_fit, the hour_profile, and what I have heard in the",
-            "   last few days. Note the titles of recent daylists.",
+            '1. Call `now_context` with playlist: "daylist". Read vibe_fit, the hour_profile, and what',
+            "   I have heard in the last few days. Note the descriptions of its recent revisions.",
             "",
-            "2. Pick the vibe for THIS hour. Prefer one with lift > 1 \u2014 that is measured evidence I",
+            "2. Pick the vibe for THIS hour. Prefer one with lift > 1: that is measured evidence I",
             "   really do reach for it now. Where lift is null there is no history for that region, so",
-            "   fall back to `suits_hour`. If two are close, take the one the recent daylists have used",
+            "   fall back to `suits_hour`. If two are close, take the one the recent revisions have used",
             "   least. Call `get_vibe_profile` to hear what that region actually contains here, and",
             "   check its mood_spread: a wide one means you will have to narrow the search yourself.",
             "",
@@ -2448,27 +2471,29 @@ server.registerPrompt(
             "     - keep the set coherent: narrow `tempo_feel` and `intensity` rather than taking",
             "       whatever the region returns. Two tracks with the same mood word can still sound",
             "       nothing alike, and the axes are what stop that",
-            "     - pass `exclude_recent_daylists: 6` so this list is not a rerun",
+            '     - pass `exclude_recent_runs: {playlist: "daylist", runs: 6}` so this is not a rerun',
             "     - pass `max_per_artist: 2` so it does not collapse onto one artist",
             "     - pass `hour_of_day` from the context and leave sort on `affinity`",
             "     - over-fetch (limit ~60) and then choose the final set yourself for flow",
             "   Mix roughly 70% things I clearly love with 30% that are either long-unheard",
-            "   (`not_listened_within_days`) or recently added \u2014 a daylist that only replays this",
+            "   (`not_listened_within_days`) or recently added: a daylist that only replays this",
             "   week's rotation is boring.",
             "",
             "4. Sequence them deliberately: open with something that lands immediately, keep the energy",
             "   coherent with the hour, avoid two songs by the same artist back to back, and do not put",
             "   a sparse acoustic track next to a dense loud one however well they match on mood.",
             "",
-            "5. Name it the way Spotify names a daylist: lowercase, 2-4 words, concrete and a little",
-            "   specific, evoking the time and feel rather than the genre \u2014 e.g. 'golden hour synth cruise',",
-            "   'slow shreds tuesday haze', 'late night verse vibes'. Do not reuse a recent title.",
+            "5. Write the description the way Spotify names a daylist: lowercase, 2-4 words, concrete",
+            "   and a little specific, evoking the time and feel rather than the genre, e.g. 'golden hour",
+            "   synth cruise', 'slow shreds tuesday haze', 'late night verse vibes'. Do not reuse a",
+            "   recent one.",
             "",
-            "6. Publish with `commit_daylist`, passing the title, the ordered track_ids, and a one-line",
-            "   description of why these tracks fit this hour.",
+            '6. Publish with `commit_playlist`, passing title: "daylist", the ordered track_ids, and that',
+            "   line as the description. The playlist keeps the title `daylist` permanently: the hour's",
+            "   phrase lives in the description, so do not put it in the title and do not rename anything.",
             "",
-            "Then tell me, briefly: the title, the vibe you picked and why the data supported it, and",
-            "3-4 highlights. Do not list every track."
+            "Then tell me, briefly: the description you wrote, the vibe you picked and why the data",
+            "supported it, and 3-4 highlights. Do not list every track."
           ].filter(Boolean).join("\n")
         }
       }

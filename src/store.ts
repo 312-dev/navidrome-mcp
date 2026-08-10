@@ -79,12 +79,28 @@ export interface Track {
   mood?: Mood;
 }
 
-export interface DaylistRun {
+/**
+ * One published revision of a rolling playlist.
+ *
+ * `playlist` is the playlist's title, which is fixed for its whole life, so a
+ * run can be attributed to the list it belongs to. `description` is the line
+ * that does change between revisions, kept so a generator can see what it has
+ * recently said and not repeat the phrasing.
+ */
+export interface PlaylistRun {
   at: number;
-  title: string;
+  playlist: string;
+  description?: string;
   trackIds: string[];
 }
 
+/**
+ * What gets persisted between restarts.
+ *
+ * Mood is deliberately absent. It is read from Navidrome's own tags on every
+ * sync, so a copy here could only ever be a staler version of something the
+ * server already holds.
+ */
 interface Snapshot {
   version: number;
   syncedAt: number;
@@ -98,18 +114,20 @@ interface Snapshot {
   listenKi: number[];
   taggedTracks: string[];
   taggedArtists: string[];
-  daylistRuns: DaylistRun[];
+  playlistRuns: PlaylistRun[];
 }
 
 /**
- * Bumped to 6 when mood moved out of the snapshot entirely.
+ * A snapshot at any other version is discarded and re-synced rather than
+ * migrated. Every field in it is a cache of something Navidrome or ListenBrainz
+ * will hand back on request, so re-reading a shape whose meaning has changed
+ * costs more than starting again.
  *
- * Moods are read from Navidrome's tags on every sync now, so caching them here
- * would mean a stale copy of something the server already holds. An older
- * snapshot is discarded rather than migrated: it carries v1 labels on four axes
- * that no longer describe a point in mood-space.
+ * Version 7 keys the run history by playlist title. A version 6 file files each
+ * run under the hour's descriptor phrase instead, which names no playlist, so
+ * its track ids cannot be attributed to one.
  */
-const SNAPSHOT_VERSION = 6;
+const SNAPSHOT_VERSION = 7;
 
 /**
  * Progress goes to stderr, never stdout: stdout is the MCP JSON-RPC channel and
@@ -125,14 +143,13 @@ export interface StoreOptions {
   listenBrainzUser?: string;
   lastFmKey?: string;
   timezone: string;
-  daylistName: string;
   /**
    * How far back to pull listen history on a cold start, in days.
    *
    * A long-standing ListenBrainz account can hold six figures of listens, and
    * walking all of them 1000 at a time costs many minutes before the server can
-   * answer anything. Recent history is also the more useful signal here: the
-   * daylist is meant to reflect current habits, not a decade-old average. Older
+   * answer anything. Recent history is also the more useful signal here: a
+   * rolling playlist reflects current habits, not a decade-old average. Older
    * listens are simply never fetched; incremental syncs then only add new ones.
    */
   historyDays: number;
@@ -158,7 +175,7 @@ export class Store {
   vibes: Record<string, string[]> = {};
   playlists: NdPlaylist[] = [];
   listens: Listen[] = [];
-  daylistRuns: DaylistRun[] = [];
+  playlistRuns: PlaylistRun[] = [];
 
   syncedAt = 0;
   listensSyncedAt = 0;
@@ -223,7 +240,7 @@ export class Store {
       this.artistTags = s.artistTags ?? {};
       this.taggedTracks = new Set(s.taggedTracks ?? []);
       this.taggedArtists = new Set(s.taggedArtists ?? []);
-      this.daylistRuns = s.daylistRuns ?? [];
+      this.playlistRuns = s.playlistRuns ?? [];
       this.listens = (s.listenTs ?? []).map((ts, i) => {
         const key = s.listenKeys[s.listenKi[i]] ?? " ";
         const sep = key.indexOf("\u0000");
@@ -290,7 +307,7 @@ export class Store {
       listenKi,
       taggedTracks: [...this.taggedTracks],
       taggedArtists: [...this.taggedArtists],
-      daylistRuns: this.daylistRuns.slice(-200),
+      playlistRuns: this.playlistRuns.slice(-200),
     };
     await mkdir(dirname(this.snapshotPath), { recursive: true });
     // A UNIQUE temp name per write. A fixed one is only atomic single-threaded:
@@ -321,10 +338,11 @@ export class Store {
     const playlists = await nd.listPlaylists();
     this.playlists = playlists;
 
+    const rolling = new Set(this.playlistRuns.map((r) => norm(r.playlist)));
     const vibes: Record<string, string[]> = {};
     for (const p of playlists) {
       if (!p.name || !p.id) continue;
-      if (this.isNonVibePlaylist(p)) continue;
+      if (this.isNonVibePlaylist(p, rolling)) continue;
       try {
         const rows = await nd.playlistTracks(p.id);
         vibes[p.name] = rows.map((r) => r.id);
@@ -342,14 +360,15 @@ export class Store {
   /**
    * Which playlists count as hand-curated taste signal.
    *
-   * Excluded: the rolling daylist (it is our own output, so treating it as taste
-   * input would feed the generator its own tail), and anything the ListenBrainz
-   * plugin imported (those are recommendations, not the listener's own filing).
+   * Excluded: every rolling playlist this server has published to, since
+   * treating our own output as taste input feeds the generator its own tail, and
+   * anything the ListenBrainz plugin imported (those are recommendations, not
+   * the listener's own filing). Rolling playlists are recognised from the run
+   * history rather than from a name pattern, so a listener's own playlist called
+   * "daylist" still counts as taste signal until something publishes to it.
    */
-  private isNonVibePlaylist(p: NdPlaylist): boolean {
-    const name = (p.name ?? "").toLowerCase();
-    if (name === this.opts.daylistName.toLowerCase()) return true;
-    if (name.startsWith("daylist")) return true;
+  private isNonVibePlaylist(p: NdPlaylist, rollingTitles: Set<string>): boolean {
+    if (rollingTitles.has(norm(p.name ?? ""))) return true;
     if ((p.comment ?? "").includes("listenbrainz.org/playlist")) return true;
     if (/^(listenbrainz|generated daily jams|last week's jams)/i.test(p.name ?? "")) return true;
     return false;
@@ -637,9 +656,19 @@ export class Store {
       .map(([d, tracks]) => ({ decade: `${d}s`, tracks }));
   }
 
-  recordDaylistRun(run: DaylistRun): void {
-    this.daylistRuns.push(run);
-    if (this.daylistRuns.length > 200) this.daylistRuns = this.daylistRuns.slice(-200);
+  recordPlaylistRun(run: PlaylistRun): void {
+    this.playlistRuns.push(run);
+    if (this.playlistRuns.length > 200) this.playlistRuns = this.playlistRuns.slice(-200);
+  }
+
+  /** The most recent revisions of one rolling playlist, or of all of them. */
+  recentRuns(runs: number, playlist?: string): PlaylistRun[] {
+    // Guarded rather than clamped: slice(-0) is slice(0), which would hand back
+    // every run on file for a request that asked for none.
+    if (runs <= 0) return [];
+    const key = playlist ? norm(playlist) : undefined;
+    const rows = key ? this.playlistRuns.filter((r) => norm(r.playlist) === key) : this.playlistRuns;
+    return rows.slice(-runs);
   }
 
   /** Distinct free-form mood descriptors across the library. */
@@ -654,10 +683,16 @@ export class Store {
       .slice(0, limit);
   }
 
-  /** Track ids used by the last `runs` daylists, for rotation avoidance. */
-  recentDaylistTrackIds(runs: number): Set<string> {
+  /**
+   * Track ids the last `runs` revisions of one rolling playlist used.
+   *
+   * Scoped to a single playlist so each one avoids repeating itself. Pooling
+   * every rolling playlist's history instead would let a busy hourly list strip
+   * the candidates out from under all the others.
+   */
+  recentRunTrackIds(playlist: string, runs: number): Set<string> {
     const out = new Set<string>();
-    for (const r of this.daylistRuns.slice(-Math.max(0, runs))) {
+    for (const r of this.recentRuns(runs, playlist)) {
       for (const id of r.trackIds) out.add(id);
     }
     return out;

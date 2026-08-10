@@ -98,11 +98,24 @@ different fixes and all three otherwise read as an empty library.
 | `list_playlists`, `get_playlist` | Read playlists |
 | `create_playlist`, `update_playlist`, `delete_playlist` | Write playlists |
 | `create_smart_playlist` | Self-updating rules-based playlists |
-| `daylist_context` | Everything needed to generate this hour's daylist |
-| `commit_daylist` | Publish the rolling daylist atomically |
+| `now_context` | What suits right now: the hour, which vibes fit it, what dominates it, what was just heard |
+| `commit_playlist` | Publish one revision of a rolling playlist, by title |
 | `refresh_index` | Re-sync from Navidrome / ListenBrainz |
 
-Prompt: **`daylist`** - generates a Spotify-style daylist for the current hour.
+Prompt: **`daylist`** - refreshes the `daylist` playlist for the current hour.
+
+### Rolling playlists
+
+A rolling playlist is one that gets rewritten on a schedule: `daylist` hourly, `mix: chill`
+and the rest whenever they are asked for. **Its title is fixed for its whole life and the
+phrase that changes goes in the description**, which is what `commit_playlist` enforces: it
+matches on the title, never renames what it finds, and creates a playlist only when no
+playlist carries that title yet. A generator that renamed its own output instead would lose
+track of it and make a new one on the next run, and nobody notices that until the sidebar
+holds forty near-identical lists.
+
+`search_tracks`'s `exclude_recent_runs` keeps a rolling playlist off its own recent tracks.
+It is scoped to one playlist, so the hourly daylist moving fast does not starve the others.
 
 ## Configuration
 
@@ -115,7 +128,6 @@ Prompt: **`daylist`** - generates a Spotify-style daylist for the current hour.
 | `LASTFM_API_KEY` | no | Defaults to Navidrome's bundled public key |
 | `NAVIDROME_TZ` | no | Default `America/Chicago`. Time-of-day analysis depends on this |
 | `NAVIDROME_DATA_DIR` | no | Snapshot location. Default `/data/navidrome-mcp` |
-| `DAYLIST_PLAYLIST_NAME` | no | Default `daylist` |
 | `NAVIDROME_ENRICH` | no | `0` disables background Last.fm tag fetching |
 
 ## Licence
