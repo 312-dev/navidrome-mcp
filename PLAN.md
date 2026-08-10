@@ -175,15 +175,23 @@ must write exactly these. Changing one is a breaking change across two repos.
 | Tag | Kind | Notes |
 |---|---|---|
 | `mood` | multi | 2-4 vocabulary terms. Standard Vorbis/ID3 field, mapped by Navidrome already |
-| `moodenergy` `moodvalence` `moodintensity` `moodacousticness` `mooddensity` | numeric 0-100 | Need declaring under `Tags` in Navidrome's config to be queryable server-side |
-| `moodtempo` | enum | `still\|slow\|mid\|driving\|frantic` |
-| `moodvocal` | enum | `instrumental\|sung\|rapped\|mixed` |
-| `moodtime` | multi | time-of-day slots |
+| `ndmood_energy` `ndmood_valence` `ndmood_intensity` `ndmood_acousticness` `ndmood_density` | numeric 0-100 | Need declaring under `Tags` in Navidrome's config to be queryable server-side |
+| `ndmood_tempo` | enum | `still\|slow\|mid\|driving\|frantic` |
+| `ndmood_vocal` | enum | `instrumental\|sung\|rapped\|mixed` |
+| `ndmood_time` | multi | time-of-day slots |
 | `vibe` | multi | region names, computed by the plugin from its own anchors |
 
 The connector treats the five axes plus tempo and vocal as **all-or-nothing**: a
 partial point cannot be measured against another one, so a track missing any of
 them is treated as unlabelled rather than as a point with a zero on one axis.
+
+The eight axis tags sit under `ndmood_` and not `mood` on purpose. Navidrome's
+REST filter on `tag_name` has no custom mapping, so it falls through to the
+starts-with default in `persistence/sql_restful.go` and compiles to `tag.tag_name
+LIKE 'mood%'`. The UI's Mood dropdown passes `tag_name: 'mood'`, which therefore
+matched all nine tags and returned 288 rows instead of 52. Song-level field
+filters are exact rather than prefix-matched, so nothing about querying changed
+with the rename.
 
 **Open: the plugin's name.** It writes ten tags now, and `mood` describes one of
 them. `navidrome-moodspace` is the leading alternative -- it names the coordinate
@@ -240,9 +248,9 @@ two containers, one with the `Tags` config block and one without:
   error, which is exactly the invisible failure the README warns about.
 - With it, all ten came back through `/api/song`, `vibe` intact as a
   multi-valued tag with spaces preserved (`wind down`, `slow morning`).
-- A `.nsp` smart playlist combining `gt moodenergy 50`, `lt moodvalence 45` and
-  `is moodvocal sung` selected the right track, so the numeric axes really are
-  comparable server-side rather than string-compared.
+- A `.nsp` smart playlist combining `gt ndmood_energy 50`, `lt ndmood_valence 45`
+  and `is ndmood_vocal sung` selected the right track, so the numeric axes
+  really are comparable server-side rather than string-compared.
 - `moodFromTags` parsed both tracks straight from the live API response, and the
   two sat 113.6 apart in mood-space with no shared vibe. The cross-repo contract
   holds in both directions.

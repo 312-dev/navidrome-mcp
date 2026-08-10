@@ -28,17 +28,24 @@ import { canonicalise } from "./vocabulary.js";
  *
  * Changing any of these is a breaking change across two repositories, so they
  * are named once, here, rather than spelled out at each use.
+ *
+ * The axes deliberately sit under `ndmood_` rather than sharing the `mood`
+ * prefix. Navidrome's REST filter on `tag_name` has no custom mapping and falls
+ * through to a starts-with default, so the UI's Mood dropdown, which passes
+ * `tag_name: 'mood'`, matched every axis tag too and buried the 52 mood words
+ * under a few hundred numbers. Song-level field filters are exact, so this
+ * changes identifiers only, not query behaviour.
  */
 export const TAGS = {
   moods: "mood",
-  energy: "moodenergy",
-  valence: "moodvalence",
-  intensity: "moodintensity",
-  acousticness: "moodacousticness",
-  density: "mooddensity",
-  tempo: "moodtempo",
-  vocal: "moodvocal",
-  times: "moodtime",
+  energy: "ndmood_energy",
+  valence: "ndmood_valence",
+  intensity: "ndmood_intensity",
+  acousticness: "ndmood_acousticness",
+  density: "ndmood_density",
+  tempo: "ndmood_tempo",
+  vocal: "ndmood_vocal",
+  times: "ndmood_time",
   vibes: "vibe",
 } as const;
 

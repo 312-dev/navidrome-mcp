@@ -1159,14 +1159,14 @@ function spreadRadius(points, quantile = 0.75) {
 // src/moodtags.ts
 var TAGS = {
   moods: "mood",
-  energy: "moodenergy",
-  valence: "moodvalence",
-  intensity: "moodintensity",
-  acousticness: "moodacousticness",
-  density: "mooddensity",
-  tempo: "moodtempo",
-  vocal: "moodvocal",
-  times: "moodtime",
+  energy: "ndmood_energy",
+  valence: "ndmood_valence",
+  intensity: "ndmood_intensity",
+  acousticness: "ndmood_acousticness",
+  density: "ndmood_density",
+  tempo: "ndmood_tempo",
+  vocal: "ndmood_vocal",
+  times: "ndmood_time",
   vibes: "vibe"
 };
 var MOOD_TAG_NAMES = Object.values(TAGS);
