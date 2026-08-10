@@ -9,6 +9,19 @@ import { z } from "zod";
 // src/listenbrainz.ts
 var API = "https://api.listenbrainz.org/1";
 var UA = "navidrome-mcp/1.0 (+https://github.com/312-dev/navidrome-mcp)";
+function log(msg) {
+  console.error(`[navidrome-mcp] ${msg}`);
+}
+var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+var LbHttpError = class extends Error {
+  constructor(status, retryAfterMs, body) {
+    super(`ListenBrainz ${status}: ${body.slice(0, 200)}`);
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
+  }
+  status;
+  retryAfterMs;
+};
 var ListenBrainz = class {
   constructor(username, dispatcher2) {
     this.username = username;
@@ -21,9 +34,37 @@ var ListenBrainz = class {
     if (this.dispatcher) opts.dispatcher = this.dispatcher;
     const res = await fetch(url, opts);
     if (!res.ok) {
-      throw new Error(`ListenBrainz ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      const after = Number(res.headers.get("retry-after") ?? 0);
+      throw new LbHttpError(
+        res.status,
+        Number.isFinite(after) && after > 0 ? after * 1e3 : 0,
+        await res.text()
+      );
     }
     return await res.json();
+  }
+  /**
+   * Retry a page, honouring Retry-After when the server sends one.
+   *
+   * A 4xx that is not 429 is the caller's fault (a wrong username, a malformed
+   * bound) and will fail identically on every attempt, so it is raised at once
+   * rather than slept over.
+   */
+  async getPage(url, attempts) {
+    let backoff = 1e3;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.get(url);
+      } catch (e) {
+        const status = e instanceof LbHttpError ? e.status : 0;
+        const fatal = status >= 400 && status < 500 && status !== 429;
+        if (fatal || attempt >= attempts) throw e;
+        const wait = e instanceof LbHttpError && e.retryAfterMs || backoff;
+        log(`listens: page failed (${String(e)}), retry ${attempt}/${attempts - 1} in ${wait}ms`);
+        await sleep(wait);
+        backoff = Math.min(backoff * 2, 3e4);
+      }
+    }
   }
   async listenCount() {
     const b = await this.get(`${API}/user/${encodeURIComponent(this.username)}/listen-count`);
@@ -36,20 +77,32 @@ var ListenBrainz = class {
    * The API pages via `max_ts` (exclusive upper bound), 1000 per call, so a full
    * ~126k-listen history is ~127 requests. Incremental refreshes pass `since` and
    * normally stop after one.
+   *
+   * `truncated` reports that the walk gave up before reaching `since`. It exists
+   * because the failure it describes is otherwise invisible: a throttled walk
+   * returns a perfectly valid prefix of the history, and the caller cannot tell
+   * a quarter of an account from all of a small one. That went unnoticed here
+   * for months, leaving the index holding 32k of 126k listens.
    */
   async listens(opts = {}) {
     const since = opts.since ?? 0;
     const max = opts.max ?? Infinity;
+    const attempts = opts.attemptsPerPage ?? 5;
     const out = [];
     let maxTs;
+    let truncated = false;
     for (let page = 0; page < 2e3; page++) {
       const qs = new URLSearchParams({ count: "1000" });
       if (maxTs !== void 0) qs.set("max_ts", String(maxTs));
       let body;
       try {
-        body = await this.get(`${API}/user/${encodeURIComponent(this.username)}/listens?${qs}`);
+        body = await this.getPage(
+          `${API}/user/${encodeURIComponent(this.username)}/listens?${qs}`,
+          attempts
+        );
       } catch (e) {
-        console.error(`[navidrome-mcp] listens: stopping early after ${out.length} (${String(e)})`);
+        log(`listens: giving up after ${out.length} listens, history is INCOMPLETE (${String(e)})`);
+        truncated = true;
         break;
       }
       const payload = body.payload;
@@ -71,16 +124,40 @@ var ListenBrainz = class {
           ts,
           artist: m.artist_name,
           track: m.track_name,
-          release: m.release_name
+          release: m.release_name,
+          client: m.additional_info?.submission_client
         });
       }
       opts.onProgress?.(out.length);
       if (hitFloor || out.length >= max || !Number.isFinite(oldest)) break;
       maxTs = oldest;
     }
-    return out.slice(0, Number.isFinite(max) ? max : void 0);
+    return {
+      listens: out.slice(0, Number.isFinite(max) ? max : void 0),
+      truncated
+    };
   }
 };
+var DUPLICATE_WINDOW_SEC = 360;
+function dedupeListens(listens) {
+  const sorted = [...listens].sort(
+    (a, b) => a.ts - b.ts || (a.client ?? "").localeCompare(b.client ?? "")
+  );
+  const recent = /* @__PURE__ */ new Map();
+  const kept = [];
+  for (const l of sorted) {
+    const key = `${norm(l.artist)}\0${norm(l.track)}`;
+    const seen = (recent.get(key) ?? []).filter((p) => l.ts - p.ts <= DUPLICATE_WINDOW_SEC);
+    if (seen.some((p) => !!p.client && !!l.client && p.client !== l.client)) {
+      recent.set(key, seen);
+      continue;
+    }
+    seen.push(l);
+    recent.set(key, seen);
+    kept.push(l);
+  }
+  return { kept, dropped: listens.length - kept.length };
+}
 function matchKey(artist, track) {
   return `${norm(artist)}\0${norm(track)}`;
 }
@@ -1224,8 +1301,8 @@ function moodDiagnosis(total, labelled, anyMoodTag) {
 }
 
 // src/store.ts
-var SNAPSHOT_VERSION = 7;
-function log(msg) {
+var SNAPSHOT_VERSION = 8;
+function log2(msg) {
   console.error(`[navidrome-mcp] ${msg}`);
 }
 function toMs(s) {
@@ -1301,7 +1378,12 @@ var Store = class {
       this.listens = (s.listenTs ?? []).map((ts, i) => {
         const key = s.listenKeys[s.listenKi[i]] ?? " ";
         const sep = key.indexOf("\0");
-        return { ts, artist: key.slice(0, sep), track: key.slice(sep + 1) };
+        return {
+          ts,
+          artist: key.slice(0, sep),
+          track: key.slice(sep + 1),
+          client: s.listenClients?.[s.listenCli?.[i] ?? -1]
+        };
       });
       this.build(s.songs ?? []);
       return this.tracks.length > 0;
@@ -1335,6 +1417,9 @@ var Store = class {
     const listenKeys = [];
     const listenTs = [];
     const listenKi = [];
+    const clientIndex = /* @__PURE__ */ new Map();
+    const listenClients = [];
+    const listenCli = [];
     for (const l of this.listens) {
       const k = `${l.artist}\0${l.track}`;
       let i = keyIndex.get(k);
@@ -1345,6 +1430,14 @@ var Store = class {
       }
       listenTs.push(l.ts);
       listenKi.push(i);
+      const c = l.client ?? "";
+      let ci = clientIndex.get(c);
+      if (ci === void 0) {
+        ci = listenClients.length;
+        clientIndex.set(c, ci);
+        listenClients.push(c);
+      }
+      listenCli.push(ci);
     }
     const snap = {
       version: SNAPSHOT_VERSION,
@@ -1357,6 +1450,8 @@ var Store = class {
       listenKeys,
       listenTs,
       listenKi,
+      listenClients,
+      listenCli,
       taggedTracks: [...this.taggedTracks],
       taggedArtists: [...this.taggedArtists],
       playlistRuns: this.playlistRuns.slice(-200)
@@ -1378,9 +1473,9 @@ var Store = class {
     const nd = this.opts.navidrome;
     const t0 = Date.now();
     const songs = await nd.allSongs((n) => {
-      if (n % 2e3 === 0) log(`library: ${n} tracks pulled`);
+      if (n % 2e3 === 0) log2(`library: ${n} tracks pulled`);
     });
-    log(`library: ${songs.length} tracks in ${Math.round((Date.now() - t0) / 1e3)}s`);
+    log2(`library: ${songs.length} tracks in ${Math.round((Date.now() - t0) / 1e3)}s`);
     const playlists = await nd.listPlaylists();
     this.playlists = playlists;
     const rolling = new Set(this.playlistRuns.map((r) => norm(r.playlist)));
@@ -1396,7 +1491,7 @@ var Store = class {
     }
     this.vibes = vibes;
     this.syncedAt = Date.now();
-    log(`vibes: ${Object.keys(vibes).length} curated playlists indexed`);
+    log2(`vibes: ${Object.keys(vibes).length} curated playlists indexed`);
     this.build(songs);
     return { tracks: this.tracks.length, vibes: Object.keys(vibes).length };
   }
@@ -1421,13 +1516,18 @@ var Store = class {
     const floor = Math.floor(Date.now() / 1e3) - this.opts.historyDays * 86400;
     const since = full ? floor : Math.max(this.listensSyncedAt, floor);
     const t0 = Date.now();
-    const fresh = await this.lb.listens({
+    const { listens: fresh, truncated } = await this.lb.listens({
       since,
       onProgress: (n) => {
-        if (n % 5e3 === 0) log(`listens: ${n} fetched (${Math.round((Date.now() - t0) / 1e3)}s)`);
+        if (n % 5e3 === 0) log2(`listens: ${n} fetched (${Math.round((Date.now() - t0) / 1e3)}s)`);
       }
     });
-    log(`listens: ${fresh.length} new in ${Math.round((Date.now() - t0) / 1e3)}s`);
+    log2(`listens: ${fresh.length} new in ${Math.round((Date.now() - t0) / 1e3)}s`);
+    if (truncated) {
+      log2(
+        `listens: WARNING history is incomplete, holding ${this.listens.length + fresh.length}. Counts and "never listened" are understated until a full resync succeeds.`
+      );
+    }
     if (fresh.length) {
       const seen = new Set(this.listens.map((l) => `${l.ts}|${l.artist}|${l.track}`));
       for (const l of fresh) {
@@ -1437,7 +1537,9 @@ var Store = class {
           this.listens.push(l);
         }
       }
-      this.listens.sort((a, b) => a.ts - b.ts);
+      const { kept, dropped } = dedupeListens(this.listens);
+      this.listens = kept;
+      if (dropped) log2(`listens: ${dropped} cross-submitter duplicate(s) collapsed`);
     }
     this.listensSyncedAt = this.listens.length ? this.listens[this.listens.length - 1].ts : 0;
     this.applyListenStats();
@@ -1726,7 +1828,9 @@ var store = new Store({
   listenBrainzUser: env.LISTENBRAINZ_USER,
   lastFmKey: env.LASTFM_API_KEY,
   timezone: TZ,
-  historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 730) || 730,
+  // Effectively the whole account. See StoreOptions.historyDays for why this is
+  // not a short window: the counts this feeds are documented as lifetime.
+  historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 7300) || 7300,
   enrich: env.NAVIDROME_ENRICH !== "0"
 });
 function result(summary, data) {
@@ -2420,7 +2524,9 @@ server.registerTool(
     description: "Re-sync from Navidrome and/or ListenBrainz. The index is a cache: the library is pulled in full (~20s) and listens incrementally. Call this if the library changed and results look stale.",
     inputSchema: {
       scope: z.enum(["library", "listens", "all"]).optional().describe("Default 'all'."),
-      full_listens: z.boolean().optional().describe("Re-pull the entire listen history, not just new ones.")
+      full_listens: z.boolean().optional().describe(
+        "Re-pull the entire listen history, not just new ones. Needed when listens were added with OLDER timestamps, which is what an importer backfilling history does: an incremental sync resumes from the newest listen already held and never looks behind it."
+      )
     }
   },
   tool(async ({ scope, full_listens }) => {

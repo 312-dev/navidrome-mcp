@@ -17,7 +17,8 @@
     "dev": "npx tsx src/index.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "check:vocab": "tsx scripts/check-vocabulary.ts"
+    "check:vocab": "tsx scripts/check-vocabulary.ts",
+    "check:dedupe": "tsx scripts/check-dedupe.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.0",

@@ -21,7 +21,14 @@ import { dirname, join } from "node:path";
 import { LastFm, type Tag } from "./lastfm.js";
 import { moodFromTags, moodDiagnosis, MOOD_TAG_NAMES } from "./moodtags.js";
 import type { Mood } from "./moodspace.js";
-import { ListenBrainz, matchKey, norm, primaryArtist, type Listen } from "./listenbrainz.js";
+import {
+  ListenBrainz,
+  dedupeListens,
+  matchKey,
+  norm,
+  primaryArtist,
+  type Listen,
+} from "./listenbrainz.js";
 import type { NdPlaylist, NdSong, Navidrome } from "./navidrome.js";
 
 export interface Track {
@@ -112,6 +119,9 @@ interface Snapshot {
   listenKeys: string[];
   listenTs: number[];
   listenKi: number[];
+  /** Distinct submission clients, indexed by listenCli. */
+  listenClients: string[];
+  listenCli: number[];
   taggedTracks: string[];
   taggedArtists: string[];
   playlistRuns: PlaylistRun[];
@@ -123,11 +133,17 @@ interface Snapshot {
  * will hand back on request, so re-reading a shape whose meaning has changed
  * costs more than starting again.
  *
+ * Version 8 records each listen's submission client and holds a deduplicated
+ * history. A version 7 file has neither: it was written before cross-submitter
+ * duplicates were recognised, so its listen counts are inflated wherever two
+ * sources reported the same play, and it carries nothing to detect that with.
+ * Discarding it is the migration.
+ *
  * Version 7 keys the run history by playlist title. A version 6 file files each
  * run under the hour's descriptor phrase instead, which names no playlist, so
  * its track ids cannot be attributed to one.
  */
-const SNAPSHOT_VERSION = 7;
+const SNAPSHOT_VERSION = 8;
 
 /**
  * Progress goes to stderr, never stdout: stdout is the MCP JSON-RPC channel and
@@ -146,11 +162,21 @@ export interface StoreOptions {
   /**
    * How far back to pull listen history on a cold start, in days.
    *
-   * A long-standing ListenBrainz account can hold six figures of listens, and
-   * walking all of them 1000 at a time costs many minutes before the server can
-   * answer anything. Recent history is also the more useful signal here: a
-   * rolling playlist reflects current habits, not a decade-old average. Older
-   * listens are simply never fetched; incremental syncs then only add new ones.
+   * This was 730 on the reasoning that a rolling playlist reflects current
+   * habits rather than a decade-old average, and that walking six figures of
+   * listens 1000 at a time costs minutes before the server can answer anything.
+   * The first half is still true of the daylist. It is wrong for everything
+   * else: `listen_count_min`/`max` claim to be lifetime counts, and a deep cut
+   * is precisely a track whose last play falls outside any recent window. Under
+   * a two-year ceiling both quietly answered a different question, and a
+   * Last.fm history imported into ListenBrainz was invisible.
+   *
+   * The cost is paid once. The walk is bounded by the account, not the window,
+   * and the result is persisted; only a discarded snapshot pays it again.
+   *
+   * Note this bounds a COLD start. Incremental syncs resume from the newest
+   * listen held, so listens backfilled with older timestamps (an importer
+   * filling in history) need a full resync to be picked up, not a tick.
    */
   historyDays: number;
   /**
@@ -244,7 +270,12 @@ export class Store {
       this.listens = (s.listenTs ?? []).map((ts, i) => {
         const key = s.listenKeys[s.listenKi[i]] ?? " ";
         const sep = key.indexOf("\u0000");
-        return { ts, artist: key.slice(0, sep), track: key.slice(sep + 1) };
+        return {
+          ts,
+          artist: key.slice(0, sep),
+          track: key.slice(sep + 1),
+          client: s.listenClients?.[s.listenCli?.[i] ?? -1],
+        };
       });
       this.build(s.songs ?? []);
       return this.tracks.length > 0;
@@ -283,6 +314,12 @@ export class Store {
     const listenKeys: string[] = [];
     const listenTs: number[] = [];
     const listenKi: number[] = [];
+    // Clients are interned the same way the artist/track keys are: there is a
+    // handful of distinct submitters across six figures of listens, so storing
+    // the string on every listen would cost more than the rest of the history.
+    const clientIndex = new Map<string, number>();
+    const listenClients: string[] = [];
+    const listenCli: number[] = [];
     for (const l of this.listens) {
       const k = `${l.artist}\u0000${l.track}`;
       let i = keyIndex.get(k);
@@ -293,6 +330,15 @@ export class Store {
       }
       listenTs.push(l.ts);
       listenKi.push(i);
+
+      const c = l.client ?? "";
+      let ci = clientIndex.get(c);
+      if (ci === undefined) {
+        ci = listenClients.length;
+        clientIndex.set(c, ci);
+        listenClients.push(c);
+      }
+      listenCli.push(ci);
     }
     const snap: Snapshot = {
       version: SNAPSHOT_VERSION,
@@ -305,6 +351,8 @@ export class Store {
       listenKeys,
       listenTs,
       listenKi,
+      listenClients,
+      listenCli,
       taggedTracks: [...this.taggedTracks],
       taggedArtists: [...this.taggedArtists],
       playlistRuns: this.playlistRuns.slice(-200),
@@ -381,14 +429,24 @@ export class Store {
     // listen we already hold, which is always newer than the floor.
     const since = full ? floor : Math.max(this.listensSyncedAt, floor);
     const t0 = Date.now();
-    const fresh = await this.lb.listens({
+    const { listens: fresh, truncated } = await this.lb.listens({
       since,
       onProgress: (n) => {
         if (n % 5000 === 0) log(`listens: ${n} fetched (${Math.round((Date.now() - t0) / 1000)}s)`);
       },
     });
     log(`listens: ${fresh.length} new in ${Math.round((Date.now() - t0) / 1000)}s`);
+    if (truncated) {
+      log(
+        `listens: WARNING history is incomplete, holding ${this.listens.length + fresh.length}. ` +
+          `Counts and "never listened" are understated until a full resync succeeds.`,
+      );
+    }
     if (fresh.length) {
+      // Exact-timestamp identity, which is only re-fetch of a listen we already
+      // hold. Duplicates from a second submitter never match here, since they
+      // carry a different timestamp for the same play; dedupeListens below is
+      // what collapses those.
       const seen = new Set(this.listens.map((l) => `${l.ts}|${l.artist}|${l.track}`));
       for (const l of fresh) {
         const k = `${l.ts}|${l.artist}|${l.track}`;
@@ -397,7 +455,12 @@ export class Store {
           this.listens.push(l);
         }
       }
-      this.listens.sort((a, b) => a.ts - b.ts);
+      // Over the whole history, not just the new rows: it is idempotent, so this
+      // both collapses new arrivals against what we hold and repairs a history
+      // fetched before a submitter started double-reporting.
+      const { kept, dropped } = dedupeListens(this.listens);
+      this.listens = kept;
+      if (dropped) log(`listens: ${dropped} cross-submitter duplicate(s) collapsed`);
     }
     this.listensSyncedAt = this.listens.length ? this.listens[this.listens.length - 1]!.ts : 0;
     this.applyListenStats();

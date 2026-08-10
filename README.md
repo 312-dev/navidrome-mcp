@@ -25,12 +25,35 @@ So this server maintains its own index and joins three sources:
 | Source | Provides |
 |---|---|
 | Navidrome (native + Subsonic APIs) | Authoritative metadata, similarity agents, the playlist write path |
-| ListenBrainz | Timestamped listen history: time-of-day and weekday habits |
+| ListenBrainz | Timestamped listen history: lifetime counts, time-of-day and weekday habits |
 | Last.fm | A real descriptive tag vocabulary (`nu-disco`, `melancholy`, `shoegaze`) |
 
 Only the first is required. Listen history, Last.fm tags and your own playlists each improve
 ranking and time-of-day fit where they exist, and none of them is load-bearing: the same
 query means the same thing in a library that has none of them.
+
+### Listen history has two failure modes worth knowing about
+
+Both were live here until 2026-08-10, and both are silent.
+
+**The history can be a prefix.** ListenBrainz throttles a deep backwards walk, and the
+paging loop used to keep whatever it had and carry on. A truncated history is a valid one:
+nothing distinguishes a quarter of a large account from all of a small one. The index held
+32k of 126k listens for months. Pages are now retried with backoff, and a walk that still
+gives up says so in the log and marks the sync incomplete rather than reporting success.
+
+**One play can arrive twice.** Scrobbling to both Last.fm and ListenBrainz while also
+running ListenBrainz's Last.fm importer delivers every play from two submitters. The
+timestamps differ, because Last.fm stamps a scrobble when it is submitted and a direct
+submitter stamps it at playback start, so nothing that keys on an exact time notices.
+Measured here: a median 219 seconds apart, inflating about a quarter of recent listens.
+`dedupeListens` collapses a pair only when a *different* submitter reported it, since two
+plays close together from the same submitter are what a genuine repeat looks like. The
+window and the reasoning are checked by `npm run check:dedupe`.
+
+`LISTENBRAINZ_HISTORY_DAYS` bounds a cold start and defaults to effectively the whole
+account. Note that an incremental sync resumes from the newest listen already held, so
+listens *backfilled* with older timestamps need `refresh_index` with `full_listens`.
 
 ## Where mood comes from
 

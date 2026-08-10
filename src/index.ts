@@ -73,7 +73,9 @@ const store = new Store({
   listenBrainzUser: env.LISTENBRAINZ_USER,
   lastFmKey: env.LASTFM_API_KEY,
   timezone: TZ,
-  historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 730) || 730,
+  // Effectively the whole account. See StoreOptions.historyDays for why this is
+  // not a short window: the counts this feeds are documented as lifetime.
+  historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 7300) || 7300,
   enrich: env.NAVIDROME_ENRICH !== "0",
 });
 
@@ -965,7 +967,12 @@ server.registerTool(
       "Re-sync from Navidrome and/or ListenBrainz. The index is a cache: the library is pulled in full (~20s) and listens incrementally. Call this if the library changed and results look stale.",
     inputSchema: {
       scope: z.enum(["library", "listens", "all"]).optional().describe("Default 'all'."),
-      full_listens: z.boolean().optional().describe("Re-pull the entire listen history, not just new ones."),
+      full_listens: z
+        .boolean()
+        .optional()
+        .describe(
+          "Re-pull the entire listen history, not just new ones. Needed when listens were added with OLDER timestamps, which is what an importer backfilling history does: an incremental sync resumes from the newest listen already held and never looks behind it.",
+        ),
     },
   },
   tool(async ({ scope, full_listens }: { scope?: string; full_listens?: boolean }) => {
