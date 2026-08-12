@@ -84,7 +84,14 @@ no fallback.
 
 What the plugin writes, per track: **energy, valence, intensity, acousticness, density, how
 fast it feels, whether it is sung, two to four vocabulary terms, the times of day it fits,
-and the vibe regions it falls in**.
+the vibe regions it falls in, and for a track in none of them, the region it came closest
+to**.
+
+That last one is why `mood_vibes_near` exists. Region membership is strict, and about a
+third of a library falls outside every region; most of those are ordinary tracks a little
+past an edge rather than unusual music between the regions. Setting `mood_vibes_near`
+unions them in, which on a 9,195 track library takes the share reachable by region from
+65% to 94%. Leave it off when the region's character is the point.
 
 The vocabulary is **defined, not derived**. Each of its 52 terms carries an explicit anchor
 in mood-space, and each of the 14 vibes is a named region with a centre and a radius, so the

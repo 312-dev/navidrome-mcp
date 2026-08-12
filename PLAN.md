@@ -180,6 +180,7 @@ must write exactly these. Changing one is a breaking change across two repos.
 | `ndmood_vocal` | enum | `instrumental\|sung\|rapped\|mixed` |
 | `ndmood_time` | multi | time-of-day slots |
 | `vibe` | multi | region names, computed by the plugin from its own anchors |
+| `vibe_near` | single | the one region a track came closest to when it falls in none, within 1.5x that region's radius. Never set alongside `vibe` |
 
 The connector treats the five axes plus tempo and vocal as **all-or-nothing**: a
 partial point cannot be measured against another one, so a track missing any of

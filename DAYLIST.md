@@ -51,6 +51,9 @@ Refresh my Navidrome daylist for right now.
      - max_per_artist: 2              (so it doesn't collapse onto one artist)
      - hour_of_day from the context, sort left on "affinity"
      - limit: 60, then choose the final ~25 yourself for flow
+     - if that comes back thin, add mood_vibes_near: true rather than dropping
+       the region. It reaches the tracks that sit just outside it, which
+       get_vibe_profile counts for you as tracks_near
 
    Aim for roughly 70% things I clearly love and 30% either long-unheard
    (not_listened_within_days: 180) or recently added (added_within_days: 60).

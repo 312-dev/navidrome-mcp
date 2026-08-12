@@ -969,7 +969,9 @@ function search(store2, p) {
     if (p.bpm_max !== void 0 && !(t.bpm && t.bpm <= p.bpm_max)) continue;
     if (p.starred !== void 0 && t.starred !== p.starred) continue;
     if (p.mood_vibes?.length) {
-      if (!anyMatch([...t.mood?.vibes ?? [], ...t.vibes], p.mood_vibes)) continue;
+      const membership = [...t.mood?.vibes ?? [], ...t.vibes];
+      if (p.mood_vibes_near) membership.push(...t.mood?.vibesNear ?? []);
+      if (!anyMatch(membership, p.mood_vibes)) continue;
     }
     const needsMood = p.energy_min !== void 0 || p.energy_max !== void 0 || p.valence_min !== void 0 || p.valence_max !== void 0 || p.intensity_min !== void 0 || p.intensity_max !== void 0 || p.acousticness_min !== void 0 || p.acousticness_max !== void 0 || p.density_min !== void 0 || p.density_max !== void 0 || Boolean(p.tempo_feel?.length) || Boolean(p.vocal?.length) || Boolean(p.moods?.length) || Boolean(p.fits_time);
     if (needsMood) {
@@ -1114,7 +1116,10 @@ function brief(t) {
       vocal: t.mood.vocal,
       moods: t.mood.moods,
       fits: t.mood.times,
-      vibes: t.mood.vibes.length ? t.mood.vibes : void 0
+      vibes: t.mood.vibes.length ? t.mood.vibes : void 0,
+      // Named apart from `vibes` so a reader can see which of the two it
+      // matched on, rather than inferring it from a merged list.
+      vibes_near: t.mood.vibesNear.length ? t.mood.vibesNear : void 0
     } : void 0
   };
 }
@@ -1293,7 +1298,8 @@ var TAGS = {
   tempo: "ndmood_tempo",
   vocal: "ndmood_vocal",
   times: "ndmood_time",
-  vibes: "vibe"
+  vibes: "vibe",
+  vibesNear: "vibe_near"
 };
 var MOOD_TAG_NAMES = Object.values(TAGS);
 function first(tags, name) {
@@ -1338,7 +1344,8 @@ function moodFromTags(tags) {
     vocal,
     moods,
     times: (tags[TAGS.times] ?? []).map((t) => t.trim().toLowerCase()).filter(Boolean),
-    vibes: (tags[TAGS.vibes] ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean)
+    vibes: (tags[TAGS.vibes] ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean),
+    vibesNear: (tags[TAGS.vibesNear] ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean)
   };
 }
 function moodDiagnosis(total, labelled, anyMoodTag) {
@@ -1350,7 +1357,7 @@ function moodDiagnosis(total, labelled, anyMoodTag) {
 }
 
 // src/store.ts
-var SNAPSHOT_VERSION = 8;
+var SNAPSHOT_VERSION = 9;
 function log2(msg) {
   console.error(`[navidrome-mcp] ${msg}`);
 }
@@ -2092,6 +2099,9 @@ var searchShape = {
   mood_vibes: z.array(z.string()).optional().describe(
     `Named regions of mood-space, any-of: ${VIBE_NAMES.join(", ")}. Membership is computed from a track's mood coordinates, so this covers every labelled track in the library. Prefer this over \`vibes\` for any mood request.`
   ),
+  mood_vibes_near: z.boolean().optional().describe(
+    "Widen `mood_vibes` to tracks that sit just outside the named region rather than inside it. About a third of a library falls in no region at all, and most of those are ordinary tracks a little past an edge, so this is the difference between roughly 65% and 94% of the library being reachable by region. Set it when a request needs volume or the strict filter came back thin; leave it off when the region's character is the point."
+  ),
   fits_time: z.string().optional().describe("One of: early morning, morning, midday, afternoon, golden hour, evening, late night."),
   include_missing: z.boolean().optional().describe("Include tracks whose file is missing. Default false."),
   exclude_track_ids: z.array(z.string()).optional(),
@@ -2159,9 +2169,11 @@ server.registerTool(
     }
     const key = region ?? playlist;
     const tracks = region ? store.tracks.filter((t) => t.mood?.vibes.includes(region)) : store.vibes[playlist].map((id) => store.byId.get(id)).filter(Boolean);
+    const near = region ? store.tracks.filter((t) => t.mood?.vibesNear.includes(region)) : [];
     if (!tracks.length) {
       return result(
-        region ? `No tracks fall in the "${key}" region. ${store.moodCoverage().note}` : `Playlist "${key}" is empty.`
+        region ? `No tracks fall in the "${key}" region` + (near.length ? `, though ${near.length} sit just outside it: set mood_vibes_near to reach them.` : `. ${store.moodCoverage().note}`) : `Playlist "${key}" is empty.`,
+        region && near.length ? { vibe: key, tracks: 0, tracks_near: near.length } : void 0
       );
     }
     const points = tracks.map((t) => t.mood).filter((m) => Boolean(m));
@@ -2177,12 +2189,13 @@ server.registerTool(
     for (const t of tracks) for (let h = 0; h < 24; h++) hours[h] += t.hourHist[h] ?? 0;
     const peakHour = hours.indexOf(Math.max(...hours));
     return result(
-      `"${key}": ${tracks.length} tracks, ${fmtDuration(tracks.reduce((a, t) => a + t.duration, 0))}.`,
+      `"${key}": ${tracks.length} tracks, ${fmtDuration(tracks.reduce((a, t) => a + t.duration, 0))}.` + (near.length ? ` ${near.length} more sit just outside it (mood_vibes_near).` : ""),
       {
         vibe: key,
         kind: region ? "vibe region" : "curated playlist",
         gloss: region ? VIBE_SCHEDULE[region].gloss : void 0,
         tracks: tracks.length,
+        tracks_near: region ? near.length : void 0,
         // Where this library's take on the vibe actually sits, and how tightly
         // it holds together -- a wide spread means the region is catching things
         // that will not sequence well next to each other.

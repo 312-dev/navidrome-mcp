@@ -139,6 +139,12 @@ interface Snapshot {
  * will hand back on request, so re-reading a shape whose meaning has changed
  * costs more than starting again.
  *
+ * Version 9 reads `vibe_near`, the region a track came closest to when it falls
+ * in none. A version 8 file was built before that tag was read, so every mood in
+ * it has an empty `vibesNear` and `mood_vibes_near` would match nothing at all,
+ * which looks exactly like a library where no track is near any region. The tag
+ * is in the files already; a re-sync is what picks it up.
+ *
  * Version 8 records each listen's submission client and holds a deduplicated
  * history. A version 7 file has neither: it was written before cross-submitter
  * duplicates were recognised, so its listen counts are inflated wherever two
@@ -149,7 +155,7 @@ interface Snapshot {
  * run under the hour's descriptor phrase instead, which names no playlist, so
  * its track ids cannot be attributed to one.
  */
-const SNAPSHOT_VERSION = 8;
+const SNAPSHOT_VERSION = 9;
 
 /**
  * Progress goes to stderr, never stdout: stdout is the MCP JSON-RPC channel and

@@ -69,6 +69,19 @@ export interface Mood extends MoodPoint {
   times: string[];
   /** Vibe regions it falls in, computed by the plugin and written as tags. */
   vibes: string[];
+  /**
+   * The one region it came closest to, when it falls in none.
+   *
+   * Empty whenever `vibes` is populated, and the two never overlap: a track is
+   * in a region or near one or neither. The plugin fills this only within 1.5x
+   * a region's radius, which on a 9,195 track library moved region coverage
+   * from 65% to 94% while leaving genuine outliers in neither.
+   *
+   * It is deliberately not folded into `vibes`. "In the region" and "just
+   * outside it" are different claims, and a playlist that wants only the first
+   * has no way back once they are merged.
+   */
+  vibesNear: string[];
 }
 
 /**

@@ -47,6 +47,7 @@ export const TAGS = {
   vocal: "ndmood_vocal",
   times: "ndmood_time",
   vibes: "vibe",
+  vibesNear: "vibe_near",
 } as const;
 
 /** Every tag this server reads, for a coverage report. */
@@ -88,8 +89,8 @@ function oneOf<T extends string>(tags: TagMap, name: string, allowed: readonly T
  * tag that was never written. A half-labelled track is better treated as
  * unlabelled, which every filter already handles.
  *
- * `moods`, `times` and `vibes` are allowed to be empty -- they are descriptive,
- * and nothing computes a distance from them.
+ * `moods`, `times`, `vibes` and `vibesNear` are allowed to be empty -- they are
+ * descriptive, and nothing computes a distance from them.
  */
 export function moodFromTags(tags: TagMap): Mood | null {
   if (!tags) return null;
@@ -125,6 +126,7 @@ export function moodFromTags(tags: TagMap): Mood | null {
     moods,
     times: (tags[TAGS.times] ?? []).map((t) => t.trim().toLowerCase()).filter(Boolean),
     vibes: (tags[TAGS.vibes] ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean),
+    vibesNear: (tags[TAGS.vibesNear] ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean),
   };
 }
 

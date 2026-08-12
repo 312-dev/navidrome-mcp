@@ -253,6 +253,12 @@ const searchShape = {
     .describe(
       `Named regions of mood-space, any-of: ${VIBE_NAMES.join(", ")}. Membership is computed from a track's mood coordinates, so this covers every labelled track in the library. Prefer this over \`vibes\` for any mood request.`,
     ),
+  mood_vibes_near: z
+    .boolean()
+    .optional()
+    .describe(
+      "Widen `mood_vibes` to tracks that sit just outside the named region rather than inside it. About a third of a library falls in no region at all, and most of those are ordinary tracks a little past an edge, so this is the difference between roughly 65% and 94% of the library being reachable by region. Set it when a request needs volume or the strict filter came back thin; leave it off when the region's character is the point.",
+    ),
   fits_time: z
     .string()
     .optional()
@@ -344,11 +350,20 @@ server.registerTool(
     const tracks = region
       ? store.tracks.filter((t) => t.mood?.vibes.includes(region))
       : (store.vibes[playlist!]!.map((id) => store.byId.get(id)).filter(Boolean) as Track[]);
+    // Tracks that just missed the region. Reported rather than folded in, so a
+    // caller can see what `mood_vibes_near` would add before deciding to widen,
+    // and so a thin region reads as "thin, and here is the reserve" rather than
+    // simply thin.
+    const near = region ? store.tracks.filter((t) => t.mood?.vibesNear.includes(region)) : [];
     if (!tracks.length) {
       return result(
         region
-          ? `No tracks fall in the "${key}" region. ${store.moodCoverage().note}`
+          ? `No tracks fall in the "${key}" region` +
+            (near.length
+              ? `, though ${near.length} sit just outside it: set mood_vibes_near to reach them.`
+              : `. ${store.moodCoverage().note}`)
           : `Playlist "${key}" is empty.`,
+        region && near.length ? { vibe: key, tracks: 0, tracks_near: near.length } : undefined,
       );
     }
     const points = tracks.map((t) => t.mood).filter((m): m is NonNullable<typeof m> => Boolean(m));
@@ -365,12 +380,14 @@ server.registerTool(
     const peakHour = hours.indexOf(Math.max(...hours));
 
     return result(
-      `"${key}": ${tracks.length} tracks, ${fmtDuration(tracks.reduce((a, t) => a + t.duration, 0))}.`,
+      `"${key}": ${tracks.length} tracks, ${fmtDuration(tracks.reduce((a, t) => a + t.duration, 0))}.` +
+        (near.length ? ` ${near.length} more sit just outside it (mood_vibes_near).` : ""),
       {
         vibe: key,
         kind: region ? "vibe region" : "curated playlist",
         gloss: region ? VIBE_SCHEDULE[region]!.gloss : undefined,
         tracks: tracks.length,
+        tracks_near: region ? near.length : undefined,
         // Where this library's take on the vibe actually sits, and how tightly
         // it holds together -- a wide spread means the region is catching things
         // that will not sequence well next to each other.

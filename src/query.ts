@@ -70,6 +70,8 @@ export interface SearchParams {
   exclude_moods?: string[];
   /** Universal vibe regions the track's mood falls inside. */
   mood_vibes?: string[];
+  /** Widen `mood_vibes` to tracks that fall just outside the named region. */
+  mood_vibes_near?: boolean;
   fits_time?: string;
   include_missing?: boolean;
   exclude_track_ids?: string[];
@@ -232,8 +234,16 @@ export function search(store: Store, p: SearchParams): { total: number; tracks: 
     // Vibe membership, computed from the track's mood coordinates. Curated
     // playlists are unioned in where they happen to share a name with a region,
     // so a listener who already files under "late night" keeps that filing.
+    //
+    // `mood_vibes_near` unions in the tracks that fall just outside the region.
+    // It is off by default because the two are different claims and a caller
+    // that asked for a region should get that region; on a real library it is
+    // the difference between 65% and 94% of tracks being reachable at all, so
+    // it is what a request that needs volume more than precision should set.
     if (p.mood_vibes?.length) {
-      if (!anyMatch([...(t.mood?.vibes ?? []), ...t.vibes], p.mood_vibes)) continue;
+      const membership = [...(t.mood?.vibes ?? []), ...t.vibes];
+      if (p.mood_vibes_near) membership.push(...(t.mood?.vibesNear ?? []));
+      if (!anyMatch(membership, p.mood_vibes)) continue;
     }
 
     // Mood-axis filters. A track with no mood yet cannot satisfy one, so it
@@ -417,6 +427,9 @@ export function brief(t: Track): Record<string, unknown> {
           moods: t.mood.moods,
           fits: t.mood.times,
           vibes: t.mood.vibes.length ? t.mood.vibes : undefined,
+          // Named apart from `vibes` so a reader can see which of the two it
+          // matched on, rather than inferring it from a merged list.
+          vibes_near: t.mood.vibesNear.length ? t.mood.vibesNear : undefined,
         }
       : undefined,
   };
