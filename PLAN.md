@@ -53,6 +53,16 @@ The split is not "the plugin does data, the connector does logic". It is
 | Do these two tracks sit well together? | connector | Sequencing is not the labeller's job |
 | What suits 7am? | connector | Scheduling is a playlist concern; the plugin has no opinion about clocks |
 | Did the user mean `mellow` when they typed `chill`? | connector | Query-side input folding |
+| How often has this track been played? | connector, then Navidrome | The history lives in ListenBrainz and nowhere else locally; the connector walks it, and `scripts/` writes the result into Navidrome's own `annotation` table so every client sees it, not just this server |
+
+That last row was a late correction. The connector held the listen history to
+itself for months, so Navidrome's UI, its smart playlists and every Subsonic
+client sorted by a play count that only covered what Navidrome itself had
+served: 976 plays against a real history of 123,157 listens. Navidrome has no
+scrobble import path to fix it with (outbound scrobbler, `IncPlayCount` is
+`play_count + 1`), so the backfill writes the database directly. Never through
+`/rest/scrobble`, which would forward every historical play back to
+ListenBrainz.
 
 So the connector keeps `moodspace.ts` (distance, centroid, sequencing) and a
 region-to-hours table, and keeps a generated term/synonym list for folding user

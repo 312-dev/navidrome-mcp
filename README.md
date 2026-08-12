@@ -115,6 +115,52 @@ says which of the three causes applies (plugin never run, plugin ran but wrote n
 tags written but not declared in Navidrome's own config file) because those need
 different fixes and all three otherwise read as an empty library.
 
+## Backfilling Navidrome's play counts
+
+Navidrome counts only what Navidrome served. Its scrobbler is outbound only and
+`IncPlayCount` is `play_count + 1`, so there is no import path: a library
+listened to for years before Navidrome existed shows a handful of plays, and
+every smart playlist, client sort and `listen_count_min` filter reads that
+number rather than the real one. On the library this was built against it was
+976 plays against a ListenBrainz history of 123,157 listens.
+
+`scripts/` closes the gap. Two steps, because they run in different places:
+
+```sh
+tsx scripts/plan-playcounts.ts /data/navidrome-mcp/index.json playcounts.json
+python3 scripts/apply-playcounts.py playcounts.json /data/navidrome.db          # dry run
+python3 scripts/apply-playcounts.py playcounts.json /data/navidrome.db --write
+```
+
+The planner matches the history to tracks with the same key this server uses for
+everything else, so a fix to the matcher fixes both at once. The applier is
+standard-library Python because it has to run wherever `navidrome.db` is, which
+is often a machine with no node; pointing it at a Docker volume works:
+
+```sh
+docker run --rm -v <volume>:/data -v "$PWD":/host python:3.12-slim \
+  python /host/apply-playcounts.py /host/playcounts.json /data/navidrome.db --write
+```
+
+Four things worth knowing before running it:
+
+- **Do not use Navidrome's `/rest/scrobble` endpoint instead**, however much
+  more supported it looks. Navidrome forwards a scrobble to ListenBrainz and
+  Last.fm, so replaying a decade of history through it submits that history back
+  to the service it came from and corrupts it permanently.
+- **The write is a floor, not an assignment.** `max(existing, imported)` means
+  Navidrome's own counting is never rolled back and a second run changes
+  nothing. Only `play_count` and `play_date` are touched; `starred` and `rating`
+  share the row and are the user's own judgements.
+- **A play can land on more than one file.** Nothing in a scrobble says which
+  copy was played, so a library holding both a single and an album version
+  credits both. 486 of 7,580 matched tracks were in that position here. Each
+  track's own count stays defensible; the library-wide total is inflated.
+- **Not every listen matches.** 50,781 of 123,157 matched nothing, which is
+  mostly music heard elsewhere and never acquired. The planner reports that
+  number every run: a sudden jump means the matcher broke, not that taste
+  changed.
+
 ## Design notes
 
 - **In-memory index, no database.** A full library pull is ~20s for ~10k tracks; once
