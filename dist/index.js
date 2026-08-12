@@ -1003,15 +1003,18 @@ function search(store2, p) {
   const limit = p.limit ?? 50;
   return { total, tracks: diversified.slice(offset, offset + limit) };
 }
+var HOUR_SHRINKAGE = 5;
+function hourShare(t, hour) {
+  return (t.hourHist[hour] ?? 0) / (t.listens + HOUR_SHRINKAGE);
+}
 function affinity(t, hour, nowSec) {
   let s = 0;
   s += Math.log1p(t.playCount) * 3;
   s += t.vibes.length * 2.5;
   if (t.starred) s += 4;
   s += (t.rating || 0) * 1.5;
-  if (hour !== void 0 && t.hourHist.length && t.listens) {
-    const share = t.hourHist[hour] / t.listens;
-    s += Math.min(share * 24, 6) * 2;
+  if (hour !== void 0 && t.hourHist.length) {
+    s += Math.min(hourShare(t, hour) * 24, 6) * 2;
   }
   if (t.lastListen) {
     const days = (nowSec - t.lastListen) / 86400;
@@ -1054,9 +1057,7 @@ function sortTracks(list, p, store2, nowSec) {
       return arr.sort((a, b) => a.title.localeCompare(b.title));
     case "hour_fit": {
       const h = p.hour_of_day ?? (/* @__PURE__ */ new Date()).getHours();
-      return arr.sort(
-        (a, b) => (b.hourHist[h] ?? 0) / Math.max(1, b.listens) - (a.hourHist[h] ?? 0) / Math.max(1, a.listens)
-      );
+      return arr.sort((a, b) => hourShare(b, h) - hourShare(a, h));
     }
     case "affinity":
     default: {

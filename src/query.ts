@@ -292,6 +292,29 @@ export function search(store: Store, p: SearchParams): { total: number; tracks: 
 }
 
 /**
+ * Listens to discount a track's hour share by before believing it.
+ *
+ * The share is a ratio over that track's own listen count, so on a small count
+ * it is noise: a track heard exactly once, at 3pm, reads as a perfect 3pm habit
+ * and beats one played there two hundred times. That is not a hypothetical.
+ * Sorting by `hour_fit` returned forty tracks of which thirty-nine had four
+ * plays or fewer, in a library whose most-played track has 171, and the daylist
+ * built from it was made almost entirely of music barely listened to.
+ *
+ * Adding a constant to the denominator pulls a thin count toward zero and
+ * leaves a thick one nearly untouched: one listen scores 1/6 rather than 1/1,
+ * and a track needs a real body of plays before its share is taken at face
+ * value. Five is enough to disqualify a single accident without demanding a
+ * history most tracks do not have.
+ */
+const HOUR_SHRINKAGE = 5;
+
+/** A track's share of listens at `hour`, discounted for thin evidence. */
+function hourShare(t: Track, hour: number): number {
+  return (t.hourHist[hour] ?? 0) / (t.listens + HOUR_SHRINKAGE);
+}
+
+/**
  * How well a track fits *this* listener, right now.
  *
  * Deliberately blends long-run evidence (play count, curated-playlist
@@ -317,11 +340,8 @@ function affinity(t: Track, hour: number | undefined, nowSec: number): number {
   s += t.vibes.length * 2.5; // filed onto a playlist by hand
   if (t.starred) s += 4;
   s += (t.rating || 0) * 1.5;
-  if (hour !== undefined && t.hourHist.length && t.listens) {
-    // Share of this track's listens that happen in this hour, versus the 1/24
-    // a uniform listener would show. Rewards genuine time-of-day habits.
-    const share = t.hourHist[hour]! / t.listens;
-    s += Math.min(share * 24, 6) * 2;
+  if (hour !== undefined && t.hourHist.length) {
+    s += Math.min(hourShare(t, hour) * 24, 6) * 2;
   }
   if (t.lastListen) {
     const days = (nowSec - t.lastListen) / 86400;
@@ -365,10 +385,7 @@ function sortTracks(list: Track[], p: SearchParams, store: Store, nowSec: number
       return arr.sort((a, b) => a.title.localeCompare(b.title));
     case "hour_fit": {
       const h = p.hour_of_day ?? new Date().getHours();
-      return arr.sort(
-        (a, b) =>
-          (b.hourHist[h] ?? 0) / Math.max(1, b.listens) - (a.hourHist[h] ?? 0) / Math.max(1, a.listens),
-      );
+      return arr.sort((a, b) => hourShare(b, h) - hourShare(a, h));
     }
     case "affinity":
     default: {
