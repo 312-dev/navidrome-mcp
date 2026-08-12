@@ -13,13 +13,21 @@
  * `apply-playcounts.py` does that, against the database, on the machine that
  * holds it.
  *
- * Two rules that are not obvious and matter more than the code:
+ * Three rules that are not obvious and matter more than the code:
  *
  *   Do not route this through Navidrome's Subsonic `/rest/scrobble` endpoint,
  *   however much more supported that looks. Navidrome forwards a scrobble on to
  *   ListenBrainz and Last.fm, so replaying a decade of history through it would
  *   submit every one of those plays back to the service they came from and
  *   corrupt the history permanently. The database is the only safe target.
+ *
+ *   The match is on artist and title on purpose, not on an identifier. Almost
+ *   no file carries a real MusicBrainz recording id, and where both sides do
+ *   carry one they disagree about a third of the time, always as the same song
+ *   under a different recording: ListenBrainz resolves a scrobble to its own
+ *   canonical recording, which is rarely the pressing on disk. Matching on ids
+ *   would be more precise and would credit fewer real plays. The README carries
+ *   the measured numbers.
  *
  *   One listen can match several files. A library with a single and an album
  *   copy of the same track has two rows sharing a match key, and the play is

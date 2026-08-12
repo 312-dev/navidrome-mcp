@@ -142,7 +142,7 @@ docker run --rm -v <volume>:/data -v "$PWD":/host python:3.12-slim \
   python /host/apply-playcounts.py /host/playcounts.json /data/navidrome.db --write
 ```
 
-Four things worth knowing before running it:
+Five things worth knowing before running it:
 
 - **Do not use Navidrome's `/rest/scrobble` endpoint instead**, however much
   more supported it looks. Navidrome forwards a scrobble to ListenBrainz and
@@ -160,6 +160,17 @@ Four things worth knowing before running it:
   mostly music heard elsewhere and never acquired. The planner reports that
   number every run: a sudden jump means the matcher broke, not that taste
   changed.
+- **Matching on identifiers instead is not the safer option it looks like**, and
+  is worth understanding before anyone tries to "fix" the fuzzy match. Two
+  reasons. Coverage: 222 of 9,200 files here carry a genuine MusicBrainz
+  recording id. A further 839 carry a Discogs id in the MusicBrainz-named
+  `musicbrainz_trackid` tag, which grades as total disagreement against
+  ListenBrainz and means nothing. Semantics: even where both sides hold real
+  ids, they disagree about a third of the time, and the sampled disagreements
+  are all the same song under a different recording, never a different song.
+  ListenBrainz maps a scrobble to its own canonical recording, which is rarely
+  the exact pressing on disk. An id join would therefore reject plays this one
+  correctly credits. It would be more precise and match less.
 
 ## Design notes
 
