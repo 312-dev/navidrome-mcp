@@ -47,8 +47,13 @@ export interface Track {
   bitRate?: number;
   suffix?: string;
   size?: number;
+  /**
+   * Navidrome's own count, and the only count anything here ranks or filters
+   * on. On a backfilled library (see the README) it holds every play from every
+   * source, which is why `listens` below is no longer scored beside it.
+   */
   playCount: number;
-  /** ms since epoch; 0 when never played through Navidrome. */
+  /** ms since epoch; 0 when Navidrome has no play date, backfilled or served. */
   playDate: number;
   starred: boolean;
   rating: number;
@@ -66,7 +71,14 @@ export interface Track {
   vibes: string[];
   /** Merged Last.fm tags (track-level preferred, artist-level fallback). */
   tags: Tag[];
-  /** Lifetime ListenBrainz listens matched to this track. */
+  /**
+   * Lifetime ListenBrainz listens matched to this track.
+   *
+   * Not a ranking input any more; `playCount` is. This survives as the
+   * denominator for `hourHist`, which is built from the same listens and would
+   * be wrong against any other total, and as the diagnostic that tells
+   * `describe_library` whether the history was ever backfilled.
+   */
   listens: number;
   /** Unix seconds. */
   lastListen: number;

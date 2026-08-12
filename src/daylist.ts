@@ -122,6 +122,11 @@ export function vibeFits(store: Store, hour: number, spread = 1): VibeFit[] {
     let totalListens = 0;
     const artistCounts = new Map<string, number>();
     for (const t of tracks) {
+      // Counts here stay on the listen index rather than Navidrome's play
+      // count, which everything else ranks on. `lift` divides a window count
+      // taken from hourHist by this total, and hourHist is built from listens,
+      // so a Navidrome denominator would divide one source's numerator by
+      // another source's total and quietly understate every lift.
       if (!t.listens) continue;
       totalListens += t.listens;
       for (const h of window) inWindow += t.hourHist[h] ?? 0;
@@ -227,11 +232,19 @@ export function recentActivity(store: Store, days = 7): {
   };
 }
 
-/** Long-loved but long-unheard -- the "rediscovery" pool. */
-export function rediscoveries(store: Store, minListens = 5, quietDays = 365, limit = 30): Track[] {
+/**
+ * Long-loved but long-unheard -- the "rediscovery" pool.
+ *
+ * "Long-loved" is Navidrome's play count, like every other ranking here.
+ * "Long-unheard" is the later of the two last-played dates, because Navidrome
+ * and the listen index each know about plays the other does not, and taking one
+ * alone would offer up something heard last week.
+ */
+export function rediscoveries(store: Store, minPlays = 5, quietDays = 365, limit = 30): Track[] {
   const cutoff = Math.floor(Date.now() / 1000) - quietDays * 86400;
+  const lastHeard = (t: Track) => Math.max(t.lastListen, Math.floor(t.playDate / 1000));
   return store.tracks
-    .filter((t) => !t.missing && t.listens >= minListens && t.lastListen && t.lastListen < cutoff)
-    .sort((a, b) => b.listens - a.listens)
+    .filter((t) => !t.missing && t.playCount >= minPlays && lastHeard(t) > 0 && lastHeard(t) < cutoff)
+    .sort((a, b) => b.playCount - a.playCount)
     .slice(0, limit);
 }

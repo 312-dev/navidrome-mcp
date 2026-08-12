@@ -580,9 +580,10 @@ function recentActivity(store2, days = 7) {
     top_artists: [...artists.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([artist, listens]) => ({ artist, listens }))
   };
 }
-function rediscoveries(store2, minListens = 5, quietDays = 365, limit = 30) {
+function rediscoveries(store2, minPlays = 5, quietDays = 365, limit = 30) {
   const cutoff = Math.floor(Date.now() / 1e3) - quietDays * 86400;
-  return store2.tracks.filter((t) => !t.missing && t.listens >= minListens && t.lastListen && t.lastListen < cutoff).sort((a, b) => b.listens - a.listens).slice(0, limit);
+  const lastHeard = (t) => Math.max(t.lastListen, Math.floor(t.playDate / 1e3));
+  return store2.tracks.filter((t) => !t.missing && t.playCount >= minPlays && lastHeard(t) > 0 && lastHeard(t) < cutoff).sort((a, b) => b.playCount - a.playCount).slice(0, limit);
 }
 
 // src/navidrome.ts
@@ -952,13 +953,13 @@ function search(store2, p) {
     }
     if (p.added_within_days !== void 0 && !(t.addedAt && now - t.addedAt <= p.added_within_days * DAY_MS)) continue;
     if (p.added_before_days !== void 0 && !(t.addedAt && now - t.addedAt >= p.added_before_days * DAY_MS)) continue;
-    if (p.never_played && (t.playCount > 0 || t.listens > 0)) continue;
+    if (p.never_played && t.playCount > 0) continue;
     if (p.played_within_days !== void 0 && !(t.playDate && now - t.playDate <= p.played_within_days * DAY_MS)) continue;
     if (p.not_played_within_days !== void 0 && t.playDate && now - t.playDate < p.not_played_within_days * DAY_MS) continue;
     if (p.play_count_min !== void 0 && t.playCount < p.play_count_min) continue;
     if (p.play_count_max !== void 0 && t.playCount > p.play_count_max) continue;
-    if (p.listen_count_min !== void 0 && t.listens < p.listen_count_min) continue;
-    if (p.listen_count_max !== void 0 && t.listens > p.listen_count_max) continue;
+    if (p.listen_count_min !== void 0 && t.playCount < p.listen_count_min) continue;
+    if (p.listen_count_max !== void 0 && t.playCount > p.listen_count_max) continue;
     if (p.listened_within_days !== void 0 && !(t.lastListen && nowSec - t.lastListen <= p.listened_within_days * 86400)) continue;
     if (p.not_listened_within_days !== void 0 && t.lastListen && nowSec - t.lastListen < p.not_listened_within_days * 86400) continue;
     if (p.hour_of_day !== void 0 && !(t.hourHist.length && t.hourHist[p.hour_of_day] > 0)) continue;
@@ -1004,8 +1005,7 @@ function search(store2, p) {
 }
 function affinity(t, hour, nowSec) {
   let s = 0;
-  s += Math.log1p(t.listens) * 3;
-  s += Math.log1p(t.playCount) * 1.5;
+  s += Math.log1p(t.playCount) * 3;
   s += t.vibes.length * 2.5;
   if (t.starred) s += 4;
   s += (t.rating || 0) * 1.5;
@@ -1034,9 +1034,8 @@ function sortTracks(list, p, store2, nowSec) {
       return arr;
     }
     case "play_count":
-      return arr.sort((a, b) => b.playCount - a.playCount);
     case "listen_count":
-      return arr.sort((a, b) => b.listens - a.listens);
+      return arr.sort((a, b) => b.playCount - a.playCount);
     case "recently_played":
       return arr.sort((a, b) => Math.max(b.playDate, b.lastListen * 1e3) - Math.max(a.playDate, a.lastListen * 1e3));
     case "least_recently_played":
@@ -2020,12 +2019,14 @@ server.registerTool(
   tool(async () => {
     const totalSec = store.tracks.reduce((a, t) => a + t.duration, 0);
     const withListens = store.tracks.filter((t) => t.listens > 0).length;
+    const withPlays = store.tracks.filter((t) => t.playCount > 0).length;
+    const unbackfilled = withListens > 0 && withPlays < withListens / 2;
     const playlists = Object.entries(store.vibes).map(([name, ids]) => ({ playlist: name, tracks: ids.length })).sort((a, b) => b.tracks - a.tracks);
     const coverage = store.moodCoverage();
     const labelled = coverage.labelled;
     const regionCounts = new Map(store.vibeHistogram().map((v) => [v.vibe, v.tracks]));
     return result(
-      `Library: ${store.tracks.length} tracks, ${fmtDuration(totalSec)} total. ${labelled} of ${store.tracks.length} mood-labelled. ${store.listens.length} listens on file (${withListens} tracks matched).`,
+      `Library: ${store.tracks.length} tracks, ${fmtDuration(totalSec)} total. ${labelled} of ${store.tracks.length} mood-labelled. ${withPlays} tracks have a play count. ${store.listens.length} listens on file (${withListens} tracks matched).`,
       {
         tracks: store.tracks.length,
         missing_files: store.tracks.filter((t) => t.missing).length,
@@ -2037,6 +2038,9 @@ server.registerTool(
         decades: store.decadeHistogram(),
         tag_vocabulary: store.tagVocabulary(80),
         listening: {
+          tracks_with_plays: withPlays,
+          total_plays: store.tracks.reduce((a, t) => a + t.playCount, 0),
+          backfill_note: unbackfilled ? `Only ${withPlays} tracks carry a Navidrome play count against ${withListens} with listen history, so the history has probably not been backfilled into Navidrome. Ranking and every play_count filter read Navidrome's count, so they are working from a fraction of the real listening. See "Backfilling Navidrome's play counts" in the README.` : void 0,
           total_listens: store.listens.length,
           tracks_with_listens: withListens,
           oldest: store.listens.length ? new Date(store.listens[0].ts * 1e3).toISOString().slice(0, 10) : null,
@@ -2080,10 +2084,10 @@ var searchShape = {
   played_within_days: z.number().optional(),
   not_played_within_days: z.number().optional().describe("Exclude anything played in the last N days."),
   never_played: z.boolean().optional(),
-  play_count_min: z.number().optional(),
+  play_count_min: z.number().optional().describe("Navidrome's play count, which after a history backfill is every play from every source."),
   play_count_max: z.number().optional(),
-  listen_count_min: z.number().optional().describe("Lifetime ListenBrainz listens."),
-  listen_count_max: z.number().optional(),
+  listen_count_min: z.number().optional().describe("Older name for play_count_min; same field."),
+  listen_count_max: z.number().optional().describe("Older name for play_count_max; same field."),
   listened_within_days: z.number().optional(),
   not_listened_within_days: z.number().optional(),
   hour_of_day: z.number().int().min(0).max(23).optional().describe("Only tracks actually listened to at this local hour. Needs listen history."),
@@ -2238,7 +2242,7 @@ server.registerTool(
         ),
         listens_by_hour: hours,
         peak_hour: hours[peakHour] ? peakHour : null,
-        sample_tracks: tracks.slice().sort((a, b) => b.listens - a.listens).slice(0, sample ?? 12).map(brief)
+        sample_tracks: tracks.slice().sort((a, b) => b.playCount - a.playCount).slice(0, sample ?? 12).map(brief)
       }
     );
   })
@@ -2296,7 +2300,7 @@ server.registerTool(
         }
       }
       const dropSeedArtists = exclude_seed_artists !== false;
-      const ranked = [...scores.entries()].map(([id, s]) => ({ t: store.byId.get(id), s })).filter((x) => x.t && !x.t.missing && !seedIds.has(x.t.id)).filter((x) => !dropSeedArtists || !seedArtistNames.has(norm(x.t.artist))).sort((a, b) => b.s - a.s || b.t.listens - a.t.listens).slice(0, limit ?? 40);
+      const ranked = [...scores.entries()].map(([id, s]) => ({ t: store.byId.get(id), s })).filter((x) => x.t && !x.t.missing && !seedIds.has(x.t.id)).filter((x) => !dropSeedArtists || !seedArtistNames.has(norm(x.t.artist))).sort((a, b) => b.s - a.s || b.t.playCount - a.t.playCount).slice(0, limit ?? 40);
       return result(`${ranked.length} similar tracks found in the library.`, {
         seeds: seeds.map((t) => `${t.artist} - ${t.title}`),
         tracks: ranked.map((x) => ({ ...brief(x.t), similarity: Number(x.s.toFixed(1)) }))

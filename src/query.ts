@@ -211,14 +211,17 @@ export function search(store: Store, p: SearchParams): { total: number; tracks: 
     if (p.added_within_days !== undefined && !(t.addedAt && now - t.addedAt <= p.added_within_days * DAY_MS)) continue;
     if (p.added_before_days !== undefined && !(t.addedAt && now - t.addedAt >= p.added_before_days * DAY_MS)) continue;
 
-    if (p.never_played && (t.playCount > 0 || t.listens > 0)) continue;
+    if (p.never_played && t.playCount > 0) continue;
     if (p.played_within_days !== undefined && !(t.playDate && now - t.playDate <= p.played_within_days * DAY_MS)) continue;
     if (p.not_played_within_days !== undefined && t.playDate && now - t.playDate < p.not_played_within_days * DAY_MS) continue;
     if (p.play_count_min !== undefined && t.playCount < p.play_count_min) continue;
     if (p.play_count_max !== undefined && t.playCount > p.play_count_max) continue;
 
-    if (p.listen_count_min !== undefined && t.listens < p.listen_count_min) continue;
-    if (p.listen_count_max !== undefined && t.listens > p.listen_count_max) continue;
+    // Older spellings of play_count_min/max, kept because saved rules and older
+    // prompts use them. They read the same field: a filter that answered a
+    // different number from the one next to it would be a trap, not a feature.
+    if (p.listen_count_min !== undefined && t.playCount < p.listen_count_min) continue;
+    if (p.listen_count_max !== undefined && t.playCount > p.listen_count_max) continue;
     if (p.listened_within_days !== undefined && !(t.lastListen && nowSec - t.lastListen <= p.listened_within_days * 86400)) continue;
     if (p.not_listened_within_days !== undefined && t.lastListen && nowSec - t.lastListen < p.not_listened_within_days * 86400) continue;
 
@@ -291,11 +294,18 @@ export function search(store: Store, p: SearchParams): { total: number; tracks: 
 /**
  * How well a track fits *this* listener, right now.
  *
- * Deliberately blends long-run evidence (lifetime listens, curated-playlist
+ * Deliberately blends long-run evidence (play count, curated-playlist
  * membership) with short-run state (recency, so today's rotation does not repeat
  * yesterday's) and, when asked, time-of-day fit. Weights are heuristic; the point
  * is a stable ordering that surfaces demonstrated favourites without collapsing
  * onto the same 40 tracks every time.
+ *
+ * The count comes from Navidrome and only from Navidrome. Once the history has
+ * been backfilled (see the README) that field holds every play from every
+ * source, so scoring the ListenBrainz count alongside it would weigh the same
+ * evidence twice at two different weights. The hour histogram below is the one
+ * place the listen index is still the right input, because Navidrome keeps a
+ * total and a last-played date but no shape over time.
  *
  * Every term here is optional evidence that contributes zero when absent, so a
  * library with no scrobbling and no playlists still gets a coherent ordering off
@@ -303,8 +313,7 @@ export function search(store: Store, p: SearchParams): { total: number; tracks: 
  */
 function affinity(t: Track, hour: number | undefined, nowSec: number): number {
   let s = 0;
-  s += Math.log1p(t.listens) * 3; // lifetime evidence, compressed
-  s += Math.log1p(t.playCount) * 1.5;
+  s += Math.log1p(t.playCount) * 3; // lifetime evidence, compressed
   s += t.vibes.length * 2.5; // filed onto a playlist by hand
   if (t.starred) s += 4;
   s += (t.rating || 0) * 1.5;
@@ -336,9 +345,8 @@ function sortTracks(list: Track[], p: SearchParams, store: Store, nowSec: number
       return arr;
     }
     case "play_count":
+    case "listen_count": // an older spelling of the same sort
       return arr.sort((a, b) => b.playCount - a.playCount);
-    case "listen_count":
-      return arr.sort((a, b) => b.listens - a.listens);
     case "recently_played":
       return arr.sort((a, b) => Math.max(b.playDate, b.lastListen * 1000) - Math.max(a.playDate, a.lastListen * 1000));
     case "least_recently_played":

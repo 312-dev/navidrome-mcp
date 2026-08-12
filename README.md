@@ -25,7 +25,7 @@ So this server maintains its own index and joins three sources:
 | Source | Provides |
 |---|---|
 | Navidrome (native + Subsonic APIs) | Authoritative metadata, similarity agents, the playlist write path |
-| ListenBrainz | Timestamped listen history: lifetime counts, time-of-day and weekday habits |
+| ListenBrainz | Timestamped listen history: time-of-day and weekday habits, and the source the play-count backfill below is built from |
 | Last.fm | A real descriptive tag vocabulary (`nu-disco`, `melancholy`, `shoegaze`) |
 
 Only the first is required. Listen history, Last.fm tags and your own playlists each improve
@@ -120,9 +120,15 @@ different fixes and all three otherwise read as an empty library.
 Navidrome counts only what Navidrome served. Its scrobbler is outbound only and
 `IncPlayCount` is `play_count + 1`, so there is no import path: a library
 listened to for years before Navidrome existed shows a handful of plays, and
-every smart playlist, client sort and `listen_count_min` filter reads that
+every smart playlist, client sort and `play_count_min` filter reads that
 number rather than the real one. On the library this was built against it was
 976 plays against a ListenBrainz history of 123,157 listens.
+
+Run it, and that column becomes the count for everything. Ranking, sorting and
+the count filters read Navidrome and nothing else; the connector's own listen
+total stops being scored beside it, because after a backfill the two describe
+the same plays and weighing both counts the same evidence twice. Skip it and
+`describe_library` says so, rather than leaving every ordering quietly wrong.
 
 `scripts/` closes the gap. Two steps, because they run in different places:
 

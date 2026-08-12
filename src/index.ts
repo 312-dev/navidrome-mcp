@@ -128,6 +128,14 @@ server.registerTool(
   tool(async () => {
     const totalSec = store.tracks.reduce((a, t) => a + t.duration, 0);
     const withListens = store.tracks.filter((t) => t.listens > 0).length;
+    const withPlays = store.tracks.filter((t) => t.playCount > 0).length;
+    // Ranking reads Navidrome's play count and nothing else. If the history was
+    // never backfilled into Navidrome, that count covers only what Navidrome
+    // itself served, which on a library listened to elsewhere for years is
+    // almost nothing -- and the failure is silent, because every tool still
+    // answers, just ordered by a number that is mostly zero. Saying so here is
+    // the only place a caller would find out.
+    const unbackfilled = withListens > 0 && withPlays < withListens / 2;
     const playlists = Object.entries(store.vibes)
       .map(([name, ids]) => ({ playlist: name, tracks: ids.length }))
       .sort((a, b) => b.tracks - a.tracks);
@@ -137,6 +145,7 @@ server.registerTool(
     return result(
       `Library: ${store.tracks.length} tracks, ${fmtDuration(totalSec)} total. ` +
         `${labelled} of ${store.tracks.length} mood-labelled. ` +
+        `${withPlays} tracks have a play count. ` +
         `${store.listens.length} listens on file (${withListens} tracks matched).`,
       {
         tracks: store.tracks.length,
@@ -149,6 +158,11 @@ server.registerTool(
         decades: store.decadeHistogram(),
         tag_vocabulary: store.tagVocabulary(80),
         listening: {
+          tracks_with_plays: withPlays,
+          total_plays: store.tracks.reduce((a, t) => a + t.playCount, 0),
+          backfill_note: unbackfilled
+            ? `Only ${withPlays} tracks carry a Navidrome play count against ${withListens} with listen history, so the history has probably not been backfilled into Navidrome. Ranking and every play_count filter read Navidrome's count, so they are working from a fraction of the real listening. See "Backfilling Navidrome's play counts" in the README.`
+            : undefined,
           total_listens: store.listens.length,
           tracks_with_listens: withListens,
           oldest: store.listens.length
@@ -206,10 +220,13 @@ const searchShape = {
   played_within_days: z.number().optional(),
   not_played_within_days: z.number().optional().describe("Exclude anything played in the last N days."),
   never_played: z.boolean().optional(),
-  play_count_min: z.number().optional(),
+  play_count_min: z
+    .number()
+    .optional()
+    .describe("Navidrome's play count, which after a history backfill is every play from every source."),
   play_count_max: z.number().optional(),
-  listen_count_min: z.number().optional().describe("Lifetime ListenBrainz listens."),
-  listen_count_max: z.number().optional(),
+  listen_count_min: z.number().optional().describe("Older name for play_count_min; same field."),
+  listen_count_max: z.number().optional().describe("Older name for play_count_max; same field."),
   listened_within_days: z.number().optional(),
   not_listened_within_days: z.number().optional(),
   hour_of_day: z
@@ -425,7 +442,7 @@ server.registerTool(
         peak_hour: hours[peakHour] ? peakHour : null,
         sample_tracks: tracks
           .slice()
-          .sort((a, b) => b.listens - a.listens)
+          .sort((a, b) => b.playCount - a.playCount)
           .slice(0, sample ?? 12)
           .map(brief),
       },
@@ -509,7 +526,7 @@ server.registerTool(
         .map(([id, s]) => ({ t: store.byId.get(id)!, s }))
         .filter((x) => x.t && !x.t.missing && !seedIds.has(x.t.id))
         .filter((x) => !dropSeedArtists || !seedArtistNames.has(norm(x.t.artist)))
-        .sort((a, b) => b.s - a.s || b.t.listens - a.t.listens)
+        .sort((a, b) => b.s - a.s || b.t.playCount - a.t.playCount)
         .slice(0, limit ?? 40);
 
       return result(`${ranked.length} similar tracks found in the library.`, {

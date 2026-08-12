@@ -53,7 +53,8 @@ The split is not "the plugin does data, the connector does logic". It is
 | Do these two tracks sit well together? | connector | Sequencing is not the labeller's job |
 | What suits 7am? | connector | Scheduling is a playlist concern; the plugin has no opinion about clocks |
 | Did the user mean `mellow` when they typed `chill`? | connector | Query-side input folding |
-| How often has this track been played? | connector, then Navidrome | The history lives in ListenBrainz and nowhere else locally; the connector walks it, and `scripts/` writes the result into Navidrome's own `annotation` table so every client sees it, not just this server |
+| How often has this track been played? | Navidrome | Once `scripts/` has written the walked history into Navidrome's `annotation` table, that column is the count. Ranking and every count filter read it and nothing else; the connector's own per-track listen total survives only as the denominator for the hour histogram and as the signal that the backfill has not been run |
+| When in the day is this track played? | connector | Navidrome stores a total and a last-played date, so shape over time exists only in the listen history |
 
 That last row was a late correction. The connector held the listen history to
 itself for months, so Navidrome's UI, its smart playlists and every Subsonic
