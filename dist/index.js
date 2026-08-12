@@ -450,7 +450,7 @@ var VIBE_SCHEDULE = {
 };
 var VIBE_NAMES = Object.keys(VIBE_SCHEDULE);
 
-// src/daylist.ts
+// src/timeofday.ts
 var PART_OF_DAY = [
   [5, "late night"],
   [8, "early morning"],

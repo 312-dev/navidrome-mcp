@@ -1,6 +1,12 @@
 /**
  * Time-of-day context.
  *
+ * Everything here reports evidence and none of it decides anything. What plays
+ * at this hour, which regions are over-represented in it, what was heard
+ * recently: the caller picks. The hourly daylist in DAYLIST.md is one prompt
+ * built on these numbers, not the reason they exist, which is why this file is
+ * no longer named after it.
+ *
  * A playlist for *right now* needs to know what "6pm on a Thursday" means, and
  * there are two ways to answer that. Where listening history exists this module
  * measures it: which mood regions actually get played at this hour, which

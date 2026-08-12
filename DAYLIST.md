@@ -3,6 +3,13 @@
 A Spotify-style daylist: one playlist rewritten every hour with music that fits the
 time of day, the day of week, and what you have actually been listening to.
 
+This is a recipe, not a feature of the server. Everything below is a prompt you can
+rewrite, and the deciding happens there: the server measures what you listen to at
+this hour and hands over the numbers, and the agent reading them chooses the vibe,
+the tracks and the phrase. `src/timeofday.ts` supplies that evidence and holds no
+opinion about daylists; write a different prompt and you get a different playlist
+from the same tools.
+
 ## How it behaves
 
 There is exactly **one** playlist, and it is called `daylist` permanently. Every run

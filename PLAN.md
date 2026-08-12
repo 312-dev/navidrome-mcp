@@ -107,7 +107,7 @@ hourly runs.
       `vocal` added, `organic` gone, `Mood extends MoodPoint`. Snapshot version
       4 → 5, so v1 labels are discarded rather than migrated (three of the axes
       were never measured).
-- [x] `daylist.ts`: `vibeFits` iterates `UNIVERSAL_VIBES`. Lift where history
+- [x] `timeofday.ts`: `vibeFits` iterates `UNIVERSAL_VIBES`. Lift where history
       exists, the region's own `hours` where it does not, and every region is
       reported so an unlabelled library says so instead of returning nothing.
 - [x] `index.ts`: `vibe_regions` replaces `curated_vibes`; `get_vibe_profile`

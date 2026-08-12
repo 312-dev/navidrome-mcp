@@ -26,7 +26,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { socksDispatcher } from "fetch-socks";
 import { z } from "zod";
-import { hourProfile, recentActivity, rediscoveries, timeContext, vibeFits } from "./daylist.js";
+import { hourProfile, recentActivity, rediscoveries, timeContext, vibeFits } from "./timeofday.js";
 import { Navidrome } from "./navidrome.js";
 import { brief, search, type SearchParams, type SortKey } from "./query.js";
 import { Store, type Track } from "./store.js";
