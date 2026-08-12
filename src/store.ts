@@ -158,6 +158,22 @@ interface Snapshot {
 const SNAPSHOT_VERSION = 9;
 
 /**
+ * Older versions whose listen history is still worth keeping.
+ *
+ * Discard-and-resync is the rule for everything else in the snapshot because
+ * every other field is a cache of something Navidrome hands back in seconds.
+ * The listen history is the exception and it took losing an hour to a
+ * rate-limited re-walk to see it: six figures of listens that exist in no local
+ * system, only in ListenBrainz, which enforces its budget by closing the socket
+ * rather than answering. So a migratable version keeps its listens and throws
+ * the rest away, which is the part that was actually cheap to rebuild.
+ *
+ * A version is listed here only when its listen records still parse under the
+ * current reader. Nothing else about it is trusted.
+ */
+const MIGRATABLE_HISTORY = new Set([8]);
+
+/**
  * Progress goes to stderr, never stdout: stdout is the MCP JSON-RPC channel and
  * a stray line there corrupts the protocol.
  */
@@ -256,12 +272,22 @@ export class Store {
     return this.ready;
   }
 
+  private migratedFrom: number | null = null;
+
   private async init(): Promise<void> {
     const loaded = await this.loadSnapshot();
     if (!loaded) {
       await this.syncLibrary();
       await this.syncListens();
       await this.saveSnapshot();
+    } else if (this.migratedFrom !== null) {
+      // The songs in a migrated snapshot predate the tags this version reads,
+      // and nothing else would trigger a re-read: a loaded snapshot is treated
+      // as current. Without this the new fields stay empty on every track and
+      // the filter built on them silently matches nothing.
+      await this.syncLibrary();
+      await this.saveSnapshot();
+      if (!this.historyComplete) void this.resumeHistoryInBackground();
     } else if (!this.historyComplete) {
       // A snapshot whose backwards walk was cut short. Resuming has to happen
       // without being asked, because the symptom is silent: queries answer
@@ -295,7 +321,9 @@ export class Store {
     try {
       const raw = await readFile(this.snapshotPath, "utf8");
       const s = JSON.parse(raw) as Snapshot;
-      if (s.version !== SNAPSHOT_VERSION) return false;
+      const migrating = s.version !== SNAPSHOT_VERSION;
+      if (migrating && !MIGRATABLE_HISTORY.has(s.version)) return false;
+      this.migratedFrom = migrating ? s.version : null;
       this.syncedAt = s.syncedAt;
       this.listensSyncedAt = s.listensSyncedAt;
       this.historyComplete = s.historyComplete ?? false;
@@ -316,6 +344,12 @@ export class Store {
         };
       });
       this.build(s.songs ?? []);
+      if (migrating) {
+        log(
+          `snapshot: v${s.version} migrated for its ${this.listens.length} listens; ` +
+            `re-reading the library, whose tags this version reads differently`,
+        );
+      }
       return this.tracks.length > 0;
     } catch {
       return false;

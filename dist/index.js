@@ -1358,6 +1358,7 @@ function moodDiagnosis(total, labelled, anyMoodTag) {
 
 // src/store.ts
 var SNAPSHOT_VERSION = 9;
+var MIGRATABLE_HISTORY = /* @__PURE__ */ new Set([8]);
 function log2(msg) {
   console.error(`[navidrome-mcp] ${msg}`);
 }
@@ -1410,12 +1411,17 @@ var Store = class {
     }
     return this.ready;
   }
+  migratedFrom = null;
   async init() {
     const loaded = await this.loadSnapshot();
     if (!loaded) {
       await this.syncLibrary();
       await this.syncListens();
       await this.saveSnapshot();
+    } else if (this.migratedFrom !== null) {
+      await this.syncLibrary();
+      await this.saveSnapshot();
+      if (!this.historyComplete) void this.resumeHistoryInBackground();
     } else if (!this.historyComplete) {
       void this.resumeHistoryInBackground();
     }
@@ -1440,7 +1446,9 @@ var Store = class {
     try {
       const raw = await readFile(this.snapshotPath, "utf8");
       const s = JSON.parse(raw);
-      if (s.version !== SNAPSHOT_VERSION) return false;
+      const migrating = s.version !== SNAPSHOT_VERSION;
+      if (migrating && !MIGRATABLE_HISTORY.has(s.version)) return false;
+      this.migratedFrom = migrating ? s.version : null;
       this.syncedAt = s.syncedAt;
       this.listensSyncedAt = s.listensSyncedAt;
       this.historyComplete = s.historyComplete ?? false;
@@ -1461,6 +1469,11 @@ var Store = class {
         };
       });
       this.build(s.songs ?? []);
+      if (migrating) {
+        log2(
+          `snapshot: v${s.version} migrated for its ${this.listens.length} listens; re-reading the library, whose tags this version reads differently`
+        );
+      }
       return this.tracks.length > 0;
     } catch {
       return false;
