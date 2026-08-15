@@ -77,6 +77,11 @@ const store = new Store({
   // not a short window: the counts this feeds are documented as lifetime.
   historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 7300) || 7300,
   enrich: env.NAVIDROME_ENRICH !== "0",
+  // 30 minutes. Navidrome rescans on a 1m schedule and its mood plugin labels a
+  // new track a few minutes after import, so half an hour is comfortably longer
+  // than it takes a new file to settle into its final state, and short enough
+  // that music added in the morning is playlistable by lunch. Set 0 to disable.
+  librarySyncTtlMs: Number(env.NAVIDROME_SYNC_TTL_MIN ?? 30) * 60_000,
 });
 
 // ── helpers ─────────────────────────────────────────────────────────────────

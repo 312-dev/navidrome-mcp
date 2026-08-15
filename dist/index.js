@@ -1409,7 +1409,38 @@ var Store = class {
         throw e;
       });
     }
-    return this.ready;
+    return this.ready.then(() => {
+      this.startStaleRefresh();
+    });
+  }
+  staleRefresh = null;
+  lastStaleAttempt = 0;
+  /**
+   * Re-sync the library in the background if it has gone stale.
+   *
+   * Two guards, both load-bearing. `staleRefresh` keeps concurrent tool calls
+   * from starting several pulls at once. `lastStaleAttempt` is what stops a
+   * failing Navidrome from being hammered: a failed sync leaves `syncedAt`
+   * untouched, so without it every subsequent call would see the same staleness
+   * and try again immediately.
+   */
+  startStaleRefresh() {
+    const ttl = this.opts.librarySyncTtlMs;
+    if (ttl <= 0 || this.staleRefresh) return;
+    const now = Date.now();
+    if (now - this.syncedAt < ttl || now - this.lastStaleAttempt < ttl) return;
+    this.lastStaleAttempt = now;
+    this.staleRefresh = (async () => {
+      try {
+        const { tracks } = await this.syncLibrary();
+        await this.saveSnapshot();
+        log2(`library: re-synced on staleness, ${tracks} tracks`);
+      } catch (e) {
+        log2(`library: staleness re-sync failed: ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        this.staleRefresh = null;
+      }
+    })();
   }
   migratedFrom = null;
   async init() {
@@ -1979,7 +2010,12 @@ var store = new Store({
   // Effectively the whole account. See StoreOptions.historyDays for why this is
   // not a short window: the counts this feeds are documented as lifetime.
   historyDays: Number(env.LISTENBRAINZ_HISTORY_DAYS ?? 7300) || 7300,
-  enrich: env.NAVIDROME_ENRICH !== "0"
+  enrich: env.NAVIDROME_ENRICH !== "0",
+  // 30 minutes. Navidrome rescans on a 1m schedule and its mood plugin labels a
+  // new track a few minutes after import, so half an hour is comfortably longer
+  // than it takes a new file to settle into its final state, and short enough
+  // that music added in the morning is playlistable by lunch. Set 0 to disable.
+  librarySyncTtlMs: Number(env.NAVIDROME_SYNC_TTL_MIN ?? 30) * 6e4
 });
 function result(summary, data) {
   const text = data === void 0 ? summary : `${summary}

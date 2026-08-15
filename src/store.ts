@@ -226,6 +226,23 @@ export interface StoreOptions {
    */
   externalDispatcher?: unknown;
   enrich: boolean;
+  /**
+   * How stale the library index may get before a tool call quietly re-syncs it,
+   * in milliseconds. Zero disables the check.
+   *
+   * Without this the index only ever changed when someone called
+   * `refresh_index` by hand, and nothing did. A snapshot that loads cleanly is
+   * treated as current, so a restart did not help either: music added after the
+   * last manual refresh stayed invisible to every query indefinitely. The
+   * symptom is silent, because every tool still answers, just from a library
+   * that stopped at some arbitrary past date.
+   *
+   * It also covers the slower half of the same problem. The mood plugin labels
+   * a track a few minutes after Navidrome first imports it, so a track is
+   * briefly present but unlabelled; without a later re-sync the index keeps
+   * that first, moodless version for good.
+   */
+  librarySyncTtlMs: number;
 }
 
 function toMs(s: unknown): number {
@@ -281,7 +298,44 @@ export class Store {
         throw e;
       });
     }
-    return this.ready;
+    // Deliberately not awaited: the caller gets the index as it stands and the
+    // re-sync lands for the next call. Blocking here would put a 20s library
+    // pull in front of an arbitrary query, to change an answer that is nearly
+    // always the same one.
+    return this.ready.then(() => {
+      this.startStaleRefresh();
+    });
+  }
+
+  private staleRefresh: Promise<void> | null = null;
+  private lastStaleAttempt = 0;
+
+  /**
+   * Re-sync the library in the background if it has gone stale.
+   *
+   * Two guards, both load-bearing. `staleRefresh` keeps concurrent tool calls
+   * from starting several pulls at once. `lastStaleAttempt` is what stops a
+   * failing Navidrome from being hammered: a failed sync leaves `syncedAt`
+   * untouched, so without it every subsequent call would see the same staleness
+   * and try again immediately.
+   */
+  private startStaleRefresh(): void {
+    const ttl = this.opts.librarySyncTtlMs;
+    if (ttl <= 0 || this.staleRefresh) return;
+    const now = Date.now();
+    if (now - this.syncedAt < ttl || now - this.lastStaleAttempt < ttl) return;
+    this.lastStaleAttempt = now;
+    this.staleRefresh = (async () => {
+      try {
+        const { tracks } = await this.syncLibrary();
+        await this.saveSnapshot();
+        log(`library: re-synced on staleness, ${tracks} tracks`);
+      } catch (e) {
+        log(`library: staleness re-sync failed: ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        this.staleRefresh = null;
+      }
+    })();
   }
 
   private migratedFrom: number | null = null;

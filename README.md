@@ -186,6 +186,13 @@ Five things worth knowing before running it:
   `npm ci --ignore-scripts` on Node 20.
 - **The index is a cache, never a source of truth.** If the snapshot is missing or
   unreadable the server just re-syncs.
+- **It re-syncs itself once it goes stale**, half an hour by default, in the
+  background on whatever tool call notices. `NAVIDROME_SYNC_TTL_MIN` changes the
+  window and `0` turns it off. This is not a nicety: a snapshot that loads
+  cleanly used to be treated as current forever, so music added after the last
+  manual `refresh_index` never appeared, and a restart did not help. It also
+  catches the gap where the mood plugin labels a track minutes after Navidrome
+  imports it, which otherwise froze that track in the index unlabelled.
 - **Navidrome's own compound engine is still exposed** via `create_smart_playlist`, for
   standing playlists that should keep re-evaluating server-side. Note those rules can
   only see Navidrome's own fields, not ListenBrainz listens or Last.fm tags.
@@ -238,6 +245,7 @@ It is scoped to one playlist, so the hourly daylist moving fast does not starve 
 | `NAVIDROME_TZ` | no | Default `America/Chicago`. Time-of-day analysis depends on this |
 | `NAVIDROME_DATA_DIR` | no | Snapshot location. Default `/data/navidrome-mcp` |
 | `NAVIDROME_ENRICH` | no | `0` disables background Last.fm tag fetching |
+| `NAVIDROME_SYNC_TTL_MIN` | no | Default `30`. How stale the library index may get before a tool call re-syncs it in the background; `0` disables |
 
 ## Licence
 
